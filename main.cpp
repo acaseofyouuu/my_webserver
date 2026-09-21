@@ -2,6 +2,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <netinet/in.h>
+#include <string>
 
 int main()
 {
@@ -14,6 +15,19 @@ int main()
     }
 
     std::cout << "Socket created successfully , fd = " << server_fd << '\n';
+
+    int reuse_address = 1;
+
+    if (setsockopt(server_fd,
+                   SOL_SOCKET,
+                   SO_REUSEADDR,
+                   &reuse_address,
+                   sizeof(reuse_address)) == -1)
+    {
+        std::cerr << "Failed to set socket options\n";
+        close(server_fd);
+        return 1;
+    }
 
     sockaddr_in server_address{};
 
@@ -50,6 +64,43 @@ int main()
     }
 
     std::cout << "Client connected , fd = " << client_fd << '\n';
+
+    char buffer[4096]{};
+
+    ssize_t bytes_read = read(client_fd, buffer, sizeof(buffer) - 1);
+
+    if (bytes_read == -1)
+    {
+        std::cerr << "Failed to read client request\n";
+        close(client_fd);
+        close(server_fd);
+        return 1;
+    }
+
+    std::cout << "Received request:\n"
+              << buffer << '\n';
+
+    std::string body = "<html><body><h1>Hello from my C++ WebServer!</h1></body></html>";
+
+    std::string response = "HTTP/1.1 200 OK\r\n";
+    response += "Content-Type: text/html; charset=UTF-8\r\n";
+    response += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+    response += "Connection: close\r\n";
+    response += "\r\n";
+    response += body;
+
+    ssize_t bytes_sent =
+        write(client_fd, response.c_str(), response.size());
+
+    if (bytes_sent == -1)
+    {
+        std::cerr << "Failed to send response\n";
+        close(client_fd);
+        close(server_fd);
+        return 1;
+    }
+
+    std::cout << "HTTP response sent\n";
 
     close(client_fd);
     close(server_fd);
