@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <netinet/in.h>
 #include <string>
+#include <fstream>
 
 int main()
 {
@@ -52,57 +53,77 @@ int main()
     }
 
     std::cout << "Server is listening on port 8080\n";
-    std::cout << "Waiting for a client..." << std::endl;
-
-    int client_fd = accept(server_fd, nullptr, nullptr);
-
-    if (client_fd == -1)
+    while (true)
     {
-        std::cerr << "Failed to accept client\n";
-        close(server_fd);
-        return 1;
-    }
+        std::cout << "Waiting for a client..." << std::endl;
 
-    std::cout << "Client connected , fd = " << client_fd << '\n';
+        int client_fd = accept(server_fd, nullptr, nullptr);
 
-    char buffer[4096]{};
+        if (client_fd == -1)
+        {
+            std::cerr << "Failed to accept client\n";
+            close(server_fd);
+            return 1;
+        }
 
-    ssize_t bytes_read = read(client_fd, buffer, sizeof(buffer) - 1);
+        std::cout << "Client connected , fd = " << client_fd << '\n';
 
-    if (bytes_read == -1)
-    {
-        std::cerr << "Failed to read client request\n";
+        char buffer[4096]{};
+
+        ssize_t bytes_read = read(client_fd, buffer, sizeof(buffer) - 1);
+
+        if (bytes_read == -1)
+        {
+            std::cerr << "Failed to read client request\n";
+            close(client_fd);
+            close(server_fd);
+            return 1;
+        }
+
+        std::cout << "Received request:\n"
+                  << buffer << '\n';
+
+        std::ifstream html_file("root/index.html");
+
+        if (!html_file.is_open())
+        {
+            std::cerr << "Failed to open root/index.html\n";
+            close(client_fd);
+            close(server_fd);
+            return 1;
+        }
+
+        std::string body;
+        std::string line;
+
+        while (std::getline(html_file, line))
+        {
+            body += line;
+            body += '\n';
+        }
+
+        std::string response = "HTTP/1.1 200 OK\r\n";
+        response += "Content-Type: text/html; charset=UTF-8\r\n";
+        response += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+        response += "Connection: close\r\n";
+        response += "\r\n";
+        response += body;
+
+        ssize_t bytes_sent =
+            write(client_fd, response.c_str(), response.size());
+
+        if (bytes_sent == -1)
+        {
+            std::cerr << "Failed to send response\n";
+            close(client_fd);
+            close(server_fd);
+            return 1;
+        }
+
+        std::cout << "HTTP response sent\n";
+
         close(client_fd);
-        close(server_fd);
-        return 1;
     }
-
-    std::cout << "Received request:\n"
-              << buffer << '\n';
-
-    std::string body = "<html><body><h1>Hello from my C++ WebServer!</h1></body></html>";
-
-    std::string response = "HTTP/1.1 200 OK\r\n";
-    response += "Content-Type: text/html; charset=UTF-8\r\n";
-    response += "Content-Length: " + std::to_string(body.size()) + "\r\n";
-    response += "Connection: close\r\n";
-    response += "\r\n";
-    response += body;
-
-    ssize_t bytes_sent =
-        write(client_fd, response.c_str(), response.size());
-
-    if (bytes_sent == -1)
-    {
-        std::cerr << "Failed to send response\n";
-        close(client_fd);
-        close(server_fd);
-        return 1;
-    }
-
-    std::cout << "HTTP response sent\n";
-
-    close(client_fd);
     close(server_fd);
     return 0;
 }
