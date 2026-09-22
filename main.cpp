@@ -4,6 +4,7 @@
 #include <netinet/in.h>
 #include <string>
 #include <fstream>
+#include <sstream>
 
 int main()
 {
@@ -83,11 +84,42 @@ int main()
         std::cout << "Received request:\n"
                   << buffer << '\n';
 
-        std::ifstream html_file("root/index.html");
+        std::istringstream request_stream(buffer);
+
+        std::string method;
+        std::string request_path;
+        std::string http_version;
+
+        request_stream >> method >> request_path >> http_version;
+
+        std::cout << "Method: " << method << '\n';
+        std::cout << "Path: " << request_path << '\n';
+        std::cout << "HTTP version: " << http_version << '\n';
+
+        std::string file_path;
+        std::string status_line;
+
+        if (request_path == "/")
+        {
+            file_path = "root/index.html";
+            status_line = "HTTP/1.1 200 OK\r\n";
+        }
+        else if (request_path == "/about.html")
+        {
+            file_path = "root/about.html";
+            status_line = "HTTP/1.1 200 OK\r\n";
+        }
+        else
+        {
+            file_path = "root/404.html";
+            status_line = "HTTP/1.1 404 Not Found\r\n";
+        }
+
+        std::ifstream html_file(file_path);
 
         if (!html_file.is_open())
         {
-            std::cerr << "Failed to open root/index.html\n";
+            std::cerr << "Failed to open " << file_path << '\n';
             close(client_fd);
             close(server_fd);
             return 1;
@@ -102,7 +134,7 @@ int main()
             body += '\n';
         }
 
-        std::string response = "HTTP/1.1 200 OK\r\n";
+        std::string response = status_line;
         response += "Content-Type: text/html; charset=UTF-8\r\n";
         response += "Content-Length: " + std::to_string(body.size()) + "\r\n";
         response += "Connection: close\r\n";
