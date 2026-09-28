@@ -10,7 +10,8 @@
 WebServer::WebServer(int port)
     : port_(port),
       server_fd_(-1),
-      epoll_fd_(-1)
+      epoll_fd_(-1),
+      thread_pool_(4)
 {
 }
 
@@ -146,8 +147,20 @@ void WebServer::run()
             }
             else
             {
-                HttpConnection connection(ready_fd);
-                connection.handle();
+                if (epoll_ctl(epoll_fd_,
+                              EPOLL_CTL_DEL,
+                              ready_fd,
+                              nullptr) == -1)
+                {
+                    std::cerr << "Failed to remove client socket from epoll\n";
+                    close(ready_fd);
+                    continue;
+                }
+
+                thread_pool_.enqueue([ready_fd]
+                                     {
+    HttpConnection connection(ready_fd);
+    connection.handle(); });
             }
         }
     }

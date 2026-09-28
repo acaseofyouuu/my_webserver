@@ -1,4 +1,7 @@
 #pragma once
+
+#include "threadpool/thread_pool.h"
+
 class WebServer
 {
 public:
@@ -12,4 +15,5 @@ private:
     int port_;
     int server_fd_;
     int epoll_fd_;
+    ThreadPool thread_pool_;
 };
