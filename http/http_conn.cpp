@@ -5,6 +5,58 @@
 #include <sstream>
 #include <string>
 #include <unistd.h>
+#include <filesystem>
+
+namespace
+{
+    std::string get_content_type(const std::string &file_path)
+    {
+        std::string extension =
+            std::filesystem::path(file_path).extension().string();
+
+        if (extension == ".html")
+        {
+            return "text/html; charset=UTF-8";
+        }
+
+        if (extension == ".css")
+        {
+            return "text/css; charset=UTF-8";
+        }
+
+        if (extension == ".js")
+        {
+            return "application/javascript; charset=UTF-8";
+        }
+
+        if (extension == ".png")
+        {
+            return "image/png";
+        }
+
+        if (extension == ".jpg" || extension == ".jpeg")
+        {
+            return "image/jpeg";
+        }
+
+        if (extension == ".gif")
+        {
+            return "image/gif";
+        }
+
+        if (extension == ".svg")
+        {
+            return "image/svg+xml";
+        }
+
+        if (extension == ".ico")
+        {
+            return "image/x-icon";
+        }
+
+        return "application/octet-stream";
+    }
+}
 
 HttpConnection::HttpConnection(int client_fd)
     : client_fd_(client_fd)
@@ -72,35 +124,32 @@ void HttpConnection::handle()
         status_line = "HTTP/1.1 200 OK\r\n";
     }
 
-    std::ifstream html_file(file_path);
+    std::ifstream file(file_path, std::ios::binary);
 
-    if (!html_file.is_open() && !invalid_path)
+    if (!file.is_open() && !invalid_path)
     {
         file_path = "root/404.html";
         status_line = "HTTP/1.1 404 Not Found\r\n";
 
-        html_file.clear();
-        html_file.open(file_path);
+        file.clear();
+        file.open(file_path, std::ios::binary);
     }
 
-    if (!html_file.is_open())
+    if (!file.is_open())
     {
         std::cerr << "Failed to open " << file_path << '\n';
         close(client_fd_);
         return;
     }
 
-    std::string body;
-    std::string line;
+    std::ostringstream body_stream;
+    body_stream << file.rdbuf();
 
-    while (std::getline(html_file, line))
-    {
-        body += line;
-        body += '\n';
-    }
+    std::string body = body_stream.str();
+    std::string content_type = get_content_type(file_path);
 
     std::string response = status_line;
-    response += "Content-Type: text/html; charset=UTF-8\r\n";
+    response += "Content-Type: " + content_type + "\r\n";
     response += "Content-Length: " + std::to_string(body.size()) + "\r\n";
     response += "Connection: close\r\n";
     response += "\r\n";
