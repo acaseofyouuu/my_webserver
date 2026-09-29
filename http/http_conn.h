@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 class HttpConnection
 {
 public:
@@ -9,4 +11,5 @@ public:
 
 private:
     int client_fd_;
+    bool send_all(const std::string &data);
 };

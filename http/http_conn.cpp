@@ -6,6 +6,8 @@
 #include <string>
 #include <unistd.h>
 #include <filesystem>
+#include <cerrno>
+#include <sys/socket.h>
 
 namespace
 {
@@ -63,6 +65,36 @@ HttpConnection::HttpConnection(int client_fd)
 {
 }
 
+bool HttpConnection::send_all(const std::string &data)
+{
+    std::size_t total_sent = 0;
+
+    while (total_sent < data.size())
+    {
+        ssize_t bytes_sent = send(client_fd_, data.data() + total_sent, data.size() - total_sent, MSG_NOSIGNAL);
+
+        if (bytes_sent == -1)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
+            std::cerr << "Failed to send response\n";
+            return false;
+        }
+
+        if (bytes_sent == 0)
+        {
+            std::cerr << "Connection closed while sending response\n";
+            return false;
+        }
+
+        total_sent += static_cast<std::size_t>(bytes_sent);
+    }
+
+    return true;
+}
 void HttpConnection::handle()
 {
     std::cout << "Client connected , fd = " << client_fd_ << '\n';
@@ -155,12 +187,8 @@ void HttpConnection::handle()
     response += "\r\n";
     response += body;
 
-    ssize_t bytes_sent =
-        write(client_fd_, response.c_str(), response.size());
-
-    if (bytes_sent == -1)
+    if (!send_all(response))
     {
-        std::cerr << "Failed to send response\n";
         close(client_fd_);
         return;
     }
