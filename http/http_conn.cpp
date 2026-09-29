@@ -49,26 +49,39 @@ void HttpConnection::handle()
     std::cout << "Path: " << request_path << '\n';
     std::cout << "HTTP version: " << http_version << '\n';
 
+    if (request_path == "/")
+    {
+        request_path = "/index.html";
+    }
+
+    bool invalid_path =
+        request_path.empty() || request_path.front() != '/' ||
+        request_path.find("..") != std::string::npos;
+
     std::string file_path;
     std::string status_line;
 
-    if (request_path == "/")
-    {
-        file_path = "root/index.html";
-        status_line = "HTTP/1.1 200 OK\r\n";
-    }
-    else if (request_path == "/about.html")
-    {
-        file_path = "root/about.html";
-        status_line = "HTTP/1.1 200 OK\r\n";
-    }
-    else
+    if (invalid_path)
     {
         file_path = "root/404.html";
         status_line = "HTTP/1.1 404 Not Found\r\n";
     }
+    else
+    {
+        file_path = "root" + request_path;
+        status_line = "HTTP/1.1 200 OK\r\n";
+    }
 
     std::ifstream html_file(file_path);
+
+    if (!html_file.is_open() && !invalid_path)
+    {
+        file_path = "root/404.html";
+        status_line = "HTTP/1.1 404 Not Found\r\n";
+
+        html_file.clear();
+        html_file.open(file_path);
+    }
 
     if (!html_file.is_open())
     {
