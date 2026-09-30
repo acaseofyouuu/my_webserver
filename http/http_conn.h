@@ -12,4 +12,5 @@ public:
 private:
     int client_fd_;
     bool send_all(const std::string &data);
+    bool read_request(std::string &request);
 };

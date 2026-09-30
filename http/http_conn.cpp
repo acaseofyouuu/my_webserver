@@ -65,6 +65,42 @@ HttpConnection::HttpConnection(int client_fd)
 {
 }
 
+bool HttpConnection::read_request(std::string &request)
+{
+    constexpr std::size_t max_request_size = 16 * 1024;
+    char buffer[4096];
+
+    while (request.find("\r\n\r\n") == std::string::npos)
+    {
+        ssize_t bytes_read = recv(client_fd_, buffer, sizeof(buffer), 0);
+
+        if (bytes_read == -1)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            std::cerr << "Failed to read client request\n";
+            return false;
+        }
+
+        if (bytes_read == 0)
+        {
+            std::cout << "Client closed the connection before sending a complete request\n";
+            return false;
+        }
+
+        request.append(buffer, static_cast<std::size_t>(bytes_read));
+
+        if (request.size() > max_request_size)
+        {
+            std::cerr << "HTTP request is too large\n";
+            return false;
+        }
+    }
+    return true;
+}
+
 bool HttpConnection::send_all(const std::string &data)
 {
     std::size_t total_sent = 0;
@@ -99,29 +135,18 @@ void HttpConnection::handle()
 {
     std::cout << "Client connected , fd = " << client_fd_ << '\n';
 
-    char buffer[4096]{};
+    std::string request;
 
-    ssize_t bytes_read = read(client_fd_, buffer, sizeof(buffer) - 1);
-
-    if (bytes_read == -1)
+    if (!read_request(request))
     {
-        std::cerr << "Failed to read client request\n";
         close(client_fd_);
         return;
     }
-
-    if (bytes_read == 0)
-    {
-        std::cout << "Client closed the connection before sending data\n";
-        close(client_fd_);
-        return;
-    }
-    buffer[bytes_read] = '\0';
 
     std::cout << "Received request:\n"
-              << buffer << '\n';
+              << request << '\n';
 
-    std::istringstream request_stream(buffer);
+    std::istringstream request_stream(request);
 
     std::string method;
     std::string request_path;
