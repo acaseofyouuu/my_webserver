@@ -177,19 +177,31 @@ void HttpConnection::handle()
     std::cout << "Path: " << request_path << '\n';
     std::cout << "HTTP version: " << http_version << '\n';
 
-    if (request_path == "/")
+    bool malformed_request = method.empty() || request_path.empty() || http_version.empty() || (http_version != "HTTP/1.0" && http_version != "HTTP/1.1");
+
+    bool method_not_allowed = !malformed_request && method != "GET";
+
+    if (!malformed_request && request_path == "/")
     {
         request_path = "/index.html";
     }
 
-    bool invalid_path =
-        request_path.empty() || request_path.front() != '/' ||
-        request_path.find("..") != std::string::npos;
+    bool invalid_path = !malformed_request && (request_path.front() != '/' || request_path.find("..") != std::string::npos);
 
     std::string file_path;
     std::string status_line;
 
-    if (invalid_path)
+    if (malformed_request)
+    {
+        file_path = "root/400.html";
+        status_line = "HTTP/1.1 400 Bad Request\r\n";
+    }
+    else if (method_not_allowed)
+    {
+        file_path = "root/405.html";
+        status_line = "HTTP/1.1 405 Method Not Allowed\r\n";
+    }
+    else if (invalid_path)
     {
         file_path = "root/404.html";
         status_line = "HTTP/1.1 404 Not Found\r\n";
@@ -202,7 +214,7 @@ void HttpConnection::handle()
 
     std::ifstream file(file_path, std::ios::binary);
 
-    if (!file.is_open() && !invalid_path)
+    if (!file.is_open() && status_line == "HTTP/1.1 200 OK\r\n")
     {
         file_path = "root/404.html";
         status_line = "HTTP/1.1 404 Not Found\r\n";
@@ -227,6 +239,12 @@ void HttpConnection::handle()
     std::string response = status_line;
     response += "Content-Type: " + content_type + "\r\n";
     response += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+
+    if (method_not_allowed)
+    {
+        response += "Allow: GET\r\n";
+    }
+
     response += "Connection: close\r\n";
     response += "\r\n";
     response += body;
