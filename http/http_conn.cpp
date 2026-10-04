@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <cerrno>
 #include <sys/socket.h>
+#include <sys/time.h>
 
 namespace
 {
@@ -80,6 +81,13 @@ bool HttpConnection::read_request(std::string &request)
             {
                 continue;
             }
+
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                std::cerr << "Client request timed out\n";
+                return false;
+            }
+
             std::cerr << "Failed to read client request\n";
             return false;
         }
@@ -134,6 +142,17 @@ bool HttpConnection::send_all(const std::string &data)
 void HttpConnection::handle()
 {
     std::cout << "Client connected , fd = " << client_fd_ << '\n';
+
+    timeval receive_timeout{};
+    receive_timeout.tv_sec = 5;
+    receive_timeout.tv_usec = 0;
+
+    if (setsockopt(client_fd_, SOL_SOCKET, SO_RCVTIMEO, &receive_timeout, sizeof(receive_timeout)) == -1)
+    {
+        std::cerr << "Failed to set client receive timeout\n";
+        close(client_fd_);
+        return;
+    }
 
     std::string request;
 
