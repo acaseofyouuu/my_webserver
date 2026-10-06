@@ -109,6 +109,31 @@ bool HttpConnection::read_request(std::string &request)
     return true;
 }
 
+bool HttpConnection::parse_request_line(const std::string &request, std::string &method, std::string &request_path, std::string &http_version)
+{
+    std::size_t line_end = request.find("\r\n");
+
+    if (line_end == std::string::npos)
+    {
+        return false;
+    }
+
+    std::istringstream line_stream(request.substr(0, line_end));
+    std::string extra_part;
+
+    if (!(line_stream >> method >> request_path >> http_version))
+    {
+        return false;
+    }
+
+    if (line_stream >> extra_part)
+    {
+        return false;
+    }
+
+    return true;
+}
+
 bool HttpConnection::send_all(const std::string &data)
 {
     std::size_t total_sent = 0;
@@ -165,19 +190,19 @@ void HttpConnection::handle()
     std::cout << "Received request:\n"
               << request << '\n';
 
-    std::istringstream request_stream(request);
-
     std::string method;
     std::string request_path;
     std::string http_version;
 
-    request_stream >> method >> request_path >> http_version;
+    bool request_line_valid =
+        parse_request_line(request, method, request_path, http_version);
 
     std::cout << "Method: " << method << '\n';
     std::cout << "Path: " << request_path << '\n';
     std::cout << "HTTP version: " << http_version << '\n';
 
-    bool malformed_request = method.empty() || request_path.empty() || http_version.empty() || (http_version != "HTTP/1.0" && http_version != "HTTP/1.1");
+    bool malformed_request =
+        !request_line_valid || (http_version != "HTTP/1.0" && http_version != "HTTP/1.1");
 
     bool method_not_allowed = !malformed_request && method != "GET";
 
