@@ -9,6 +9,7 @@
 #include <cerrno>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <cctype>
 
 namespace
 {
@@ -109,7 +110,10 @@ bool HttpConnection::read_request(std::string &request)
     return true;
 }
 
-bool HttpConnection::parse_request_line(const std::string &request, std::string &method, std::string &request_path, std::string &http_version)
+bool HttpConnection::parse_request_line(const std::string &request,
+                                        std::string &method,
+                                        std::string &request_path,
+                                        std::string &http_version)
 {
     std::size_t line_end = request.find("\r\n");
 
@@ -134,13 +138,78 @@ bool HttpConnection::parse_request_line(const std::string &request, std::string 
     return true;
 }
 
+bool HttpConnection::parse_headers(
+    const std::string &request,
+    std::unordered_map<std::string, std::string> &headers)
+{
+    std::size_t line_start = request.find("\r\n");
+
+    if (line_start == std::string::npos)
+    {
+        return false;
+    }
+
+    line_start += 2;
+
+    while (true)
+    {
+        std::size_t line_end = request.find("\r\n", line_start);
+
+        if (line_end == std::string::npos)
+        {
+            return false;
+        }
+
+        if (line_end == line_start)
+        {
+            return true;
+        }
+
+        std::string header_line =
+            request.substr(line_start, line_end - line_start);
+
+        std::size_t colon_position = header_line.find(':');
+
+        if (colon_position == std::string::npos ||
+            colon_position == 0)
+        {
+            return false;
+        }
+
+        std::string header_name =
+            header_line.substr(0, colon_position);
+
+        std::string header_value =
+            header_line.substr(colon_position + 1);
+
+        for (char &character : header_name)
+        {
+            character = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(character)));
+        }
+
+        while (!header_value.empty() &&
+               (header_value.front() == ' ' ||
+                header_value.front() == '\t'))
+        {
+            header_value.erase(header_value.begin());
+        }
+
+        headers[header_name] = header_value;
+        line_start = line_end + 2;
+    }
+}
+
 bool HttpConnection::send_all(const std::string &data)
 {
     std::size_t total_sent = 0;
 
     while (total_sent < data.size())
     {
-        ssize_t bytes_sent = send(client_fd_, data.data() + total_sent, data.size() - total_sent, MSG_NOSIGNAL);
+        ssize_t bytes_sent = send(client_fd_,
+                                  data.data() + total_sent,
+                                  data.size() - total_sent,
+                                  MSG_NOSIGNAL);
 
         if (bytes_sent == -1)
         {
@@ -172,7 +241,10 @@ void HttpConnection::handle()
     receive_timeout.tv_sec = 5;
     receive_timeout.tv_usec = 0;
 
-    if (setsockopt(client_fd_, SOL_SOCKET, SO_RCVTIMEO, &receive_timeout, sizeof(receive_timeout)) == -1)
+    if (setsockopt(client_fd_, SOL_SOCKET,
+                   SO_RCVTIMEO,
+                   &receive_timeout,
+                   sizeof(receive_timeout)) == -1)
     {
         std::cerr << "Failed to set client receive timeout\n";
         close(client_fd_);
@@ -197,12 +269,23 @@ void HttpConnection::handle()
     bool request_line_valid =
         parse_request_line(request, method, request_path, http_version);
 
+    std::unordered_map<std::string, std::string> headers;
+
+    bool headers_valid = parse_headers(request, headers);
+
+    bool missing_host = request_line_valid &&
+                        headers_valid &&
+                        http_version == "HTTP/1.1" &&
+                        headers.find("host") == headers.end();
+
     std::cout << "Method: " << method << '\n';
     std::cout << "Path: " << request_path << '\n';
     std::cout << "HTTP version: " << http_version << '\n';
 
-    bool malformed_request =
-        !request_line_valid || (http_version != "HTTP/1.0" && http_version != "HTTP/1.1");
+    bool malformed_request = !request_line_valid ||
+                             !headers_valid ||
+                             missing_host ||
+                             (http_version != "HTTP/1.0" && http_version != "HTTP/1.1");
 
     bool method_not_allowed = !malformed_request && method != "GET";
 
@@ -211,7 +294,10 @@ void HttpConnection::handle()
         request_path = "/index.html";
     }
 
-    bool invalid_path = !malformed_request && (request_path.front() != '/' || request_path.find("..") != std::string::npos);
+    bool invalid_path =
+        !malformed_request &&
+        (request_path.front() != '/' ||
+         request_path.find("..") != std::string::npos);
 
     std::string file_path;
     std::string status_line;
