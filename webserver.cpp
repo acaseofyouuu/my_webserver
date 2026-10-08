@@ -157,10 +157,28 @@ void WebServer::run()
                     continue;
                 }
 
-                thread_pool_.enqueue([ready_fd]
+                thread_pool_.enqueue([this, ready_fd]
                                      {
-    HttpConnection connection(ready_fd);
-    connection.handle(); });
+                    HttpConnection connection(ready_fd);
+
+                    bool keep_alive = connection.handle();
+
+                    if(!keep_alive){
+                        close(ready_fd);
+                        return;
+                    }
+
+                    epoll_event client_event{};
+                    client_event.events = EPOLLIN;
+                    client_event.data.fd = ready_fd;
+
+                    if(epoll_ctl(epoll_fd_,
+                                 EPOLL_CTL_ADD,
+                                 ready_fd,
+                                 &client_event) == -1){
+                                    std::cerr << "Failed to add keep_alive connection back to epoll\n";
+                                    close(ready_fd);
+                                 } });
             }
         }
     }

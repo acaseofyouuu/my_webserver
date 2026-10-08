@@ -8,7 +8,7 @@ class HttpConnection
 public:
     explicit HttpConnection(int client_fd);
 
-    void handle();
+    bool handle();
 
 private:
     int client_fd_;
@@ -22,4 +22,9 @@ private:
     bool parse_headers(
         const std::string &request,
         std::unordered_map<std::string, std::string> &headers);
+
+    bool should_keep_alive(
+        const std::string &http_version,
+        const std::unordered_map<std::string, std::string> &headers);
+    
 };

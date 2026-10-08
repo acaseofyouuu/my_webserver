@@ -200,6 +200,40 @@ bool HttpConnection::parse_headers(
     }
 }
 
+bool HttpConnection::should_keep_alive(
+    const std::string &http_version,
+    const std::unordered_map<std::string, std::string> &headers)
+{
+    std::string connection_value;
+
+    auto connection_header = headers.find("connection");
+
+    if (connection_header != headers.end())
+    {
+        connection_value = connection_header->second;
+
+        for (char &character : connection_value)
+        {
+            character = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(character)));
+        }
+
+        while (!connection_value.empty() &&
+               (connection_value.back() == ' ' ||
+                connection_value.back() == '\t'))
+        {
+            connection_value.pop_back();
+        }
+    }
+
+    if (http_version == "HTTP/1.1")
+    {
+        return connection_value != "close";
+    }
+
+    return connection_value == "keep-alive";
+}
+
 bool HttpConnection::send_all(const std::string &data)
 {
     std::size_t total_sent = 0;
@@ -233,7 +267,7 @@ bool HttpConnection::send_all(const std::string &data)
 
     return true;
 }
-void HttpConnection::handle()
+bool HttpConnection::handle()
 {
     std::cout << "Client connected , fd = " << client_fd_ << '\n';
 
@@ -247,16 +281,14 @@ void HttpConnection::handle()
                    sizeof(receive_timeout)) == -1)
     {
         std::cerr << "Failed to set client receive timeout\n";
-        close(client_fd_);
-        return;
+        return false;
     }
 
     std::string request;
 
     if (!read_request(request))
     {
-        close(client_fd_);
-        return;
+        return false;
     }
 
     std::cout << "Received request:\n"
@@ -286,6 +318,10 @@ void HttpConnection::handle()
                              !headers_valid ||
                              missing_host ||
                              (http_version != "HTTP/1.0" && http_version != "HTTP/1.1");
+
+    bool keep_alive =
+        !malformed_request &&
+        should_keep_alive(http_version, headers);
 
     bool method_not_allowed = !malformed_request && method != "GET";
 
@@ -337,8 +373,7 @@ void HttpConnection::handle()
     if (!file.is_open())
     {
         std::cerr << "Failed to open " << file_path << '\n';
-        close(client_fd_);
-        return;
+        return false;
     }
 
     std::ostringstream body_stream;
@@ -356,17 +391,23 @@ void HttpConnection::handle()
         response += "Allow: GET\r\n";
     }
 
-    response += "Connection: close\r\n";
+    if (keep_alive)
+    {
+        response += "Connection: keep-alive\r\n";
+    }
+    else
+    {
+        response += "Connection: close\r\n";
+    }
     response += "\r\n";
     response += body;
 
     if (!send_all(response))
     {
-        close(client_fd_);
-        return;
+        return false;
     }
 
     std::cout << "HTTP response sent\n";
 
-    close(client_fd_);
+    return keep_alive;
 }
