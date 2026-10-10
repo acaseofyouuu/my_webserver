@@ -24,7 +24,9 @@ void WebServer::remove_client_from_idle(int client_fd)
 
 void WebServer::close_idle_connections()
 {
-    constexpr auto idle_timeout = std::chrono::seconds(10);
+    auto idle_timeout =
+        std::chrono::seconds(idle_timeout_seconds_);
+        
     auto now = std::chrono::steady_clock::now();
 
     std::lock_guard<std::mutex> lock(client_activity_mutex_);
@@ -57,11 +59,14 @@ void WebServer::close_idle_connections()
     }
 }
 
-WebServer::WebServer(int port)
+WebServer::WebServer(int port,
+                     std::size_t thread_count,
+                     int idle_timeout_seconds)
     : port_(port),
+      idle_timeout_seconds_(idle_timeout_seconds),
       server_fd_(-1),
       epoll_fd_(-1),
-      thread_pool_(4)
+      thread_pool_(thread_count)
 {
 }
 

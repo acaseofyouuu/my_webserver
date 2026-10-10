@@ -4,11 +4,14 @@
 #include <chrono>
 #include <mutex>
 #include <unordered_map>
+#include <cstddef>
 
 class WebServer
 {
 public:
-    explicit WebServer(int port);
+    WebServer(int port,
+              std::size_t thread_count,
+              int idle_timeout_seconds);
     ~WebServer();
 
     bool start();
@@ -16,6 +19,7 @@ public:
 
 private:
     int port_;
+    int idle_timeout_seconds_;
     int server_fd_;
     int epoll_fd_;
     ThreadPool thread_pool_;
