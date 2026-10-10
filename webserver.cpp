@@ -7,6 +7,56 @@
 #include <netinet/in.h>
 #include <sys/epoll.h>
 
+void WebServer::mark_client_idle(int client_fd)
+{
+    std::lock_guard<std::mutex> lock(client_activity_mutex_);
+
+    client_last_active_[client_fd] =
+        std::chrono::steady_clock::now();
+}
+
+void WebServer::remove_client_from_idle(int client_fd)
+{
+    std::lock_guard<std::mutex> lock(client_activity_mutex_);
+
+    client_last_active_.erase(client_fd);
+}
+
+void WebServer::close_idle_connections()
+{
+    constexpr auto idle_timeout = std::chrono::seconds(10);
+    auto now = std::chrono::steady_clock::now();
+
+    std::lock_guard<std::mutex> lock(client_activity_mutex_);
+
+    for (auto iterator = client_last_active_.begin();
+         iterator != client_last_active_.end();)
+    {
+        auto idle_time = now - iterator->second;
+
+        if (idle_time >= idle_timeout)
+        {
+            int client_fd = iterator->first;
+
+            epoll_ctl(epoll_fd_,
+                      EPOLL_CTL_DEL,
+                      client_fd,
+                      nullptr);
+
+            close(client_fd);
+
+            std::cout << "Closed idle client, fd = "
+                      << client_fd << '\n';
+
+            iterator = client_last_active_.erase(iterator);
+        }
+        else
+        {
+            ++iterator;
+        }
+    }
+}
+
 WebServer::WebServer(int port)
     : port_(port),
       server_fd_(-1),
@@ -105,7 +155,7 @@ void WebServer::run()
         std::cout << "Waiting for events..." << std::endl;
 
         int event_count =
-            epoll_wait(epoll_fd_, events, max_events, -1);
+            epoll_wait(epoll_fd_, events, max_events, 1000);
 
         if (event_count == -1)
         {
@@ -142,11 +192,15 @@ void WebServer::run()
                     continue;
                 }
 
+                mark_client_idle(client_fd);
+
                 std::cout << "Client connected and added to epoll, fd = "
                           << client_fd << '\n';
             }
             else
             {
+                remove_client_from_idle(ready_fd);
+
                 if (epoll_ctl(epoll_fd_,
                               EPOLL_CTL_DEL,
                               ready_fd,
@@ -168,6 +222,8 @@ void WebServer::run()
                         return;
                     }
 
+                    mark_client_idle(ready_fd);
+
                     epoll_event client_event{};
                     client_event.events = EPOLLIN;
                     client_event.data.fd = ready_fd;
@@ -175,11 +231,15 @@ void WebServer::run()
                     if(epoll_ctl(epoll_fd_,
                                  EPOLL_CTL_ADD,
                                  ready_fd,
-                                 &client_event) == -1){
-                                    std::cerr << "Failed to add keep_alive connection back to epoll\n";
-                                    close(ready_fd);
-                                 } });
+                                 &client_event) == -1)
+                    {
+                        std::cerr << "Failed to add keep_alive connection back to epoll\n";
+                        remove_client_from_idle(ready_fd);
+                        close(ready_fd);
+                    } });
             }
         }
+
+        close_idle_connections();
     }
 }
