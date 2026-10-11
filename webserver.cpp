@@ -1,4 +1,5 @@
 #include "webserver.h"
+#include "log/logger.h"
 #include "http/http_conn.h"
 
 #include <iostream>
@@ -6,6 +7,7 @@
 #include <unistd.h>
 #include <netinet/in.h>
 #include <sys/epoll.h>
+#include <string>
 
 void WebServer::mark_client_idle(int client_fd)
 {
@@ -26,7 +28,7 @@ void WebServer::close_idle_connections()
 {
     auto idle_timeout =
         std::chrono::seconds(idle_timeout_seconds_);
-        
+
     auto now = std::chrono::steady_clock::now();
 
     std::lock_guard<std::mutex> lock(client_activity_mutex_);
@@ -47,8 +49,9 @@ void WebServer::close_idle_connections()
 
             close(client_fd);
 
-            std::cout << "Closed idle client, fd = "
-                      << client_fd << '\n';
+            Logger::instance().info(
+                "Closed idle client, fd = " +
+                std::to_string(client_fd));
 
             iterator = client_last_active_.erase(iterator);
         }
@@ -123,7 +126,8 @@ bool WebServer::start()
         return false;
     }
 
-    std::cout << "Server is listening on port " << port_ << '\n';
+    Logger::instance().info(
+        "Server is listening on port " + std::to_string(port_));
 
     epoll_fd_ = epoll_create1(0);
 
@@ -199,8 +203,9 @@ void WebServer::run()
 
                 mark_client_idle(client_fd);
 
-                std::cout << "Client connected and added to epoll, fd = "
-                          << client_fd << '\n';
+                Logger::instance().info(
+                    "Client connected and added to epoll, fd = " +
+                    std::to_string(client_fd));
             }
             else
             {

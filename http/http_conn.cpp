@@ -1,4 +1,5 @@
 #include "http_conn.h"
+#include "../log/logger.h"
 
 #include <fstream>
 #include <iostream>
@@ -314,6 +315,12 @@ bool HttpConnection::handle()
     std::cout << "Path: " << request_path << '\n';
     std::cout << "HTTP version: " << http_version << '\n';
 
+    Logger::instance().info(
+        "HTTP request: " +
+        method + " " +
+        request_path + " " +
+        http_version);
+
     bool malformed_request = !request_line_valid ||
                              !headers_valid ||
                              missing_host ||
@@ -407,7 +414,9 @@ bool HttpConnection::handle()
         return false;
     }
 
-    std::cout << "HTTP response sent\n";
+    Logger::instance().info(
+        "HTTP response sent: " +
+        status_line.substr(0, status_line.size() - 2));
 
     return keep_alive;
 }
