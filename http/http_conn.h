@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <unordered_map>
 
@@ -26,5 +27,6 @@ private:
     bool should_keep_alive(
         const std::string &http_version,
         const std::unordered_map<std::string, std::string> &headers);
-    
+        
+    bool read_body(std::string &request, std::size_t body_length);
 };

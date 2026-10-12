@@ -1,5 +1,6 @@
 #include "http_conn.h"
 #include "../log/logger.h"
+#include "../database/account_repository.h"
 
 #include <fstream>
 #include <iostream>
@@ -11,9 +12,106 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <cctype>
+#include <charconv>
 
 namespace
 {
+    bool decode_form_component(const std::string &encoded,
+                               std::string &decoded)
+    {
+        decoded.clear();
+
+        for (std::size_t i = 0; i < encoded.size(); ++i)
+        {
+            if (encoded[i] == '+')
+            {
+                decoded.push_back(' ');
+            }
+            else if (encoded[i] == '%')
+            {
+                if (i + 2 >= encoded.size())
+                {
+                    return false;
+                }
+
+                unsigned int byte = 0;
+                const char *begin = encoded.data() + i + 1;
+                const char *end = begin + 2;
+
+                auto result = std::from_chars(begin, end, byte, 16);
+
+                if (result.ec != std::errc{} || result.ptr != end)
+                {
+                    return false;
+                }
+
+                decoded.push_back(static_cast<char>(byte));
+                i += 2;
+            }
+            else
+            {
+                decoded.push_back(encoded[i]);
+            }
+        }
+
+        return true;
+    }
+
+    bool parse_form_fields(
+        const std::string &body,
+        std::unordered_map<std::string, std::string> &fields)
+    {
+        if (body.empty())
+        {
+            return false;
+        }
+
+        std::size_t start = 0;
+
+        while (start < body.size())
+        {
+            std::size_t end = body.find('&', start);
+
+            if (end == std::string::npos)
+            {
+                end = body.size();
+            }
+
+            std::size_t equals = body.find('=', start);
+
+            if (equals == std::string::npos ||
+                equals >= end ||
+                equals == start)
+            {
+                return false;
+            }
+
+            std::string name;
+            std::string value;
+
+            if (!decode_form_component(
+                    body.substr(start, equals - start), name) ||
+                !decode_form_component(
+                    body.substr(equals + 1, end - equals - 1), value) ||
+                name.empty() ||
+                fields.find(name) != fields.end())
+            {
+                return false;
+            }
+
+            fields.emplace(name, value);
+
+            if (end == body.size())
+            {
+                return true;
+            }
+
+            start = end + 1;
+        }
+
+        return false;
+    }
+
     std::string get_content_type(const std::string &file_path)
     {
         std::string extension =
@@ -108,6 +206,60 @@ bool HttpConnection::read_request(std::string &request)
             return false;
         }
     }
+    return true;
+}
+
+bool HttpConnection::read_body(std::string &request,
+                               std::size_t body_length)
+{
+    constexpr std::size_t max_request_size = 16 * 1024;
+    const std::size_t header_end = request.find("\r\n\r\n");
+
+    if (header_end == std::string::npos)
+    {
+        return false;
+    }
+
+    const std::size_t body_start = header_end + 4;
+
+    if (body_start > max_request_size ||
+        body_length > max_request_size - body_start)
+    {
+        return false;
+    }
+
+    char buffer[4096];
+
+    while (request.size() < body_start + body_length)
+    {
+        std::size_t remaining =
+            body_start + body_length - request.size();
+
+        std::size_t to_read =
+            remaining < sizeof(buffer) ? remaining : sizeof(buffer);
+
+        ssize_t bytes_read = recv(client_fd_, buffer, to_read, 0);
+
+        if (bytes_read == -1)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
+            std::cerr << "Failed to read request body\n";
+            return false;
+        }
+
+        if (bytes_read == 0)
+        {
+            std::cerr << "Client closed before request body was complete\n";
+            return false;
+        }
+
+        request.append(buffer, static_cast<std::size_t>(bytes_read));
+    }
+
     return true;
 }
 
@@ -268,6 +420,7 @@ bool HttpConnection::send_all(const std::string &data)
 
     return true;
 }
+
 bool HttpConnection::handle()
 {
     std::cout << "Client connected , fd = " << client_fd_ << '\n';
@@ -291,9 +444,6 @@ bool HttpConnection::handle()
     {
         return false;
     }
-
-    std::cout << "Received request:\n"
-              << request << '\n';
 
     std::string method;
     std::string request_path;
@@ -326,11 +476,89 @@ bool HttpConnection::handle()
                              missing_host ||
                              (http_version != "HTTP/1.0" && http_version != "HTTP/1.1");
 
+    std::string request_body;
+
+    if (!malformed_request && method == "POST")
+    {
+        auto length_header = headers.find("content-length");
+
+        if (length_header == headers.end())
+        {
+            malformed_request = true;
+        }
+        else
+        {
+            const std::string &value = length_header->second;
+            std::size_t body_length = 0;
+
+            auto result = std::from_chars(
+                value.data(),
+                value.data() + value.size(),
+                body_length);
+
+            if (result.ec != std::errc{} ||
+                result.ptr != value.data() + value.size() ||
+                body_length > 8 * 1024)
+            {
+                malformed_request = true;
+            }
+            else
+            {
+                if (!read_body(request, body_length))
+                {
+                    return false;
+                }
+
+                const std::size_t body_start =
+                    request.find("\r\n\r\n") + 4;
+
+                request_body = request.substr(body_start, body_length);
+            }
+        }
+    }
+
+    std::string username;
+    std::string password;
+
+    if (!malformed_request &&
+        method == "POST" &&
+        request_path == "/register")
+    {
+        auto content_type = headers.find("content-type");
+        std::unordered_map<std::string, std::string> fields;
+
+        if (content_type == headers.end() ||
+            content_type->second != "application/x-www-form-urlencoded" ||
+            !parse_form_fields(request_body, fields) ||
+            fields.size() != 2 ||
+            fields.find("username") == fields.end() ||
+            fields.find("password") == fields.end())
+        {
+            malformed_request = true;
+        }
+        else
+        {
+            username = fields["username"];
+            password = fields["password"];
+
+            if (username.empty() ||
+                username.size() > 50 ||
+                password.size() < 8 ||
+                password.size() > 128)
+            {
+                malformed_request = true;
+            }
+        }
+    }
+
     bool keep_alive =
         !malformed_request &&
         should_keep_alive(http_version, headers);
 
-    bool method_not_allowed = !malformed_request && method != "GET";
+    bool method_not_allowed =
+        !malformed_request &&
+        ((request_path == "/register" && method != "POST") ||
+         (request_path != "/register" && method != "GET"));
 
     if (!malformed_request && request_path == "/")
     {
@@ -359,6 +587,28 @@ bool HttpConnection::handle()
     {
         file_path = "root/404.html";
         status_line = "HTTP/1.1 404 Not Found\r\n";
+    }
+    else if (method == "POST" && request_path == "/register")
+    {
+        auto result =
+            AccountRepository::register_user(username, password);
+
+        if (result == AccountRepository::RegisterResult::Created)
+        {
+            file_path = "root/register_success.html";
+            status_line = "HTTP/1.1 201 Created\r\n";
+        }
+        else if (result ==
+                 AccountRepository::RegisterResult::UsernameTaken)
+        {
+            file_path = "root/register_exists.html";
+            status_line = "HTTP/1.1 409 Conflict\r\n";
+        }
+        else
+        {
+            file_path = "root/500.html";
+            status_line = "HTTP/1.1 500 Internal Server Error\r\n";
+        }
     }
     else
     {
@@ -395,7 +645,14 @@ bool HttpConnection::handle()
 
     if (method_not_allowed)
     {
-        response += "Allow: GET\r\n";
+        if (request_path == "/register")
+        {
+            response += "Allow: POST\r\n";
+        }
+        else
+        {
+            response += "Allow: GET\r\n";
+        }
     }
 
     if (keep_alive)
