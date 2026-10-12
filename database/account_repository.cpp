@@ -6,6 +6,7 @@
 #include <mysql/mysql.h>
 
 #include <string>
+#include <array>
 
 AccountRepository::RegisterResult
 AccountRepository::register_user(const std::string &username,
@@ -84,4 +85,96 @@ AccountRepository::register_user(const std::string &username,
         std::to_string(error_code));
 
     return RegisterResult::Error;
+}
+
+AccountRepository::LoginResult
+AccountRepository::verify_user(const std::string &username,
+                               const std::string &password)
+{
+    std::string stored_hash;
+
+    {
+        DatabaseConnectionGuard guard;
+        MYSQL *connection = guard.get();
+        MYSQL_STMT *statement = mysql_stmt_init(connection);
+
+        if (statement == nullptr)
+        {
+            Logger::instance().error("Failed to create login query");
+            return LoginResult::Error;
+        }
+
+        constexpr char select_sql[] =
+            "SELECT password_hash FROM accounts WHERE username = ?";
+
+        if (mysql_stmt_prepare(
+                statement, select_sql, sizeof(select_sql) - 1) != 0)
+        {
+            Logger::instance().error("Failed to prepare login query");
+            mysql_stmt_close(statement);
+            return LoginResult::Error;
+        }
+
+        std::string writable_username = username;
+        unsigned long username_length =
+            static_cast<unsigned long>(writable_username.size());
+
+        MYSQL_BIND parameter{};
+        parameter.buffer_type = MYSQL_TYPE_STRING;
+        parameter.buffer = writable_username.data();
+        parameter.buffer_length = username_length;
+        parameter.length = &username_length;
+
+        if (mysql_stmt_bind_param(statement, &parameter) != 0 ||
+            mysql_stmt_execute(statement) != 0)
+        {
+            Logger::instance().error("Failed to run login query");
+            mysql_stmt_close(statement);
+            return LoginResult::Error;
+        }
+
+        std::array<char, 256> hash_buffer{};
+        unsigned long hash_length = 0;
+
+        MYSQL_BIND result{};
+        result.buffer_type = MYSQL_TYPE_STRING;
+        result.buffer = hash_buffer.data();
+        result.buffer_length =
+            static_cast<unsigned long>(hash_buffer.size());
+        result.length = &hash_length;
+
+        if (mysql_stmt_bind_result(statement, &result) != 0 ||
+            mysql_stmt_store_result(statement) != 0)
+        {
+            Logger::instance().error("Failed to read login result");
+            mysql_stmt_close(statement);
+            return LoginResult::Error;
+        }
+
+        int fetch_result = mysql_stmt_fetch(statement);
+
+        if (fetch_result == MYSQL_NO_DATA)
+        {
+            mysql_stmt_close(statement);
+            return LoginResult::InvalidCredentials;
+        }
+
+        if (fetch_result != 0 ||
+            hash_length > hash_buffer.size())
+        {
+            Logger::instance().error("Invalid login query result");
+            mysql_stmt_close(statement);
+            return LoginResult::Error;
+        }
+
+        stored_hash.assign(hash_buffer.data(), hash_length);
+        mysql_stmt_close(statement);
+    }
+
+    if (PasswordHash::verify(password, stored_hash))
+    {
+        return LoginResult::Verified;
+    }
+
+    return LoginResult::InvalidCredentials;
 }

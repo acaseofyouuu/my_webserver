@@ -517,12 +517,16 @@ bool HttpConnection::handle()
         }
     }
 
+    bool account_action =
+        request_path == "/register" ||
+        request_path == "/login";
+
     std::string username;
     std::string password;
 
     if (!malformed_request &&
         method == "POST" &&
-        request_path == "/register")
+        account_action)
     {
         auto content_type = headers.find("content-type");
         std::unordered_map<std::string, std::string> fields;
@@ -543,7 +547,7 @@ bool HttpConnection::handle()
 
             if (username.empty() ||
                 username.size() > 50 ||
-                password.size() < 8 ||
+                (request_path == "/register" && password.size() < 8) ||
                 password.size() > 128)
             {
                 malformed_request = true;
@@ -557,8 +561,8 @@ bool HttpConnection::handle()
 
     bool method_not_allowed =
         !malformed_request &&
-        ((request_path == "/register" && method != "POST") ||
-         (request_path != "/register" && method != "GET"));
+        ((account_action && method != "POST") ||
+         (!account_action && method != "GET"));
 
     if (!malformed_request && request_path == "/")
     {
@@ -610,6 +614,28 @@ bool HttpConnection::handle()
             status_line = "HTTP/1.1 500 Internal Server Error\r\n";
         }
     }
+    else if (method == "POST" && request_path == "/login")
+    {
+        auto result =
+            AccountRepository::verify_user(username, password);
+
+        if (result == AccountRepository::LoginResult::Verified)
+        {
+            file_path = "root/login_success.html";
+            status_line = "HTTP/1.1 200 OK\r\n";
+        }
+        else if (result ==
+                 AccountRepository::LoginResult::InvalidCredentials)
+        {
+            file_path = "root/login_failed.html";
+            status_line = "HTTP/1.1 403 Forbidden\r\n";
+        }
+        else
+        {
+            file_path = "root/500.html";
+            status_line = "HTTP/1.1 500 Internal Server Error\r\n";
+        }
+    }
     else
     {
         file_path = "root" + request_path;
@@ -645,7 +671,7 @@ bool HttpConnection::handle()
 
     if (method_not_allowed)
     {
-        if (request_path == "/register")
+        if (account_action)
         {
             response += "Allow: POST\r\n";
         }
