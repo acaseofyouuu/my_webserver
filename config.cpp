@@ -9,7 +9,7 @@ bool Config::parse(int argc, char *argv[])
 {
     int option;
 
-    while ((option = getopt(argc, argv, "p:t:i:")) != -1)
+    while ((option = getopt(argc, argv, "p:t:i:s:")) != -1)
     {
         try
         {
@@ -51,10 +51,27 @@ bool Config::parse(int argc, char *argv[])
 
                 break;
 
+            case 's':
+            {
+                int value = std::stoi(optarg);
+
+                if (value < 1)
+                {
+                    std::cerr << "Database pool size must be positive\n";
+                    return false;
+                }
+
+                database_pool_size =
+                    static_cast<std::size_t>(value);
+                break;
+            }
+
             default:
                 std::cerr
                     << "Usage: " << argv[0]
-                    << " [-p port] [-t threads] [-i idle_seconds]\n";
+                    << " [-p port] [-t threads] [-i idle_seconds]"
+                    << " [-s database_connections]\n";
+                    
                 return false;
             }
         }
