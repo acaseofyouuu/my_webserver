@@ -1,6 +1,7 @@
 #include "http_conn.h"
 #include "../log/logger.h"
 #include "../database/account_repository.h"
+#include "../session/session_manager.h"
 
 #include <fstream>
 #include <iostream>
@@ -16,6 +17,48 @@
 
 namespace
 {
+    std::string get_session_id(const std::string &cookie_header)
+    {
+        std::istringstream stream(cookie_header);
+        std::string part;
+        std::string session_id;
+
+        while (std::getline(stream, part, ';'))
+        {
+            const auto start = part.find_first_not_of(" \t");
+
+            if (start == std::string::npos ||
+                part.compare(start, 11, "session_id=") != 0)
+            {
+                continue;
+            }
+
+            if (!session_id.empty())
+            {
+                return {};
+            }
+
+            std::string value = part.substr(start + 11);
+            const auto end = value.find_last_not_of(" \t");
+
+            if (end != std::string::npos)
+            {
+                value.erase(end + 1);
+            }
+
+            if (value.size() != 64 ||
+                value.find_first_not_of("0123456789abcdef") !=
+                    std::string::npos)
+            {
+                return {};
+            }
+
+            session_id = value;
+        }
+
+        return session_id;
+    }
+
     bool decode_form_component(const std::string &encoded,
                                std::string &decoded)
     {
@@ -521,6 +564,9 @@ bool HttpConnection::handle()
         request_path == "/register" ||
         request_path == "/login";
 
+    bool post_action =
+        account_action || request_path == "/logout";
+
     std::string username;
     std::string password;
 
@@ -561,8 +607,8 @@ bool HttpConnection::handle()
 
     bool method_not_allowed =
         !malformed_request &&
-        ((account_action && method != "POST") ||
-         (!account_action && method != "GET"));
+        ((post_action && method != "POST") ||
+         (!post_action && method != "GET"));
 
     if (!malformed_request && request_path == "/")
     {
@@ -574,8 +620,26 @@ bool HttpConnection::handle()
         (request_path.front() != '/' ||
          request_path.find("..") != std::string::npos);
 
+    std::string current_session_id;
+    std::string logged_in_username;
+    bool logged_in = false;
+
+    auto cookie = headers.find("cookie");
+
+    if (!malformed_request && cookie != headers.end())
+    {
+        current_session_id = get_session_id(cookie->second);
+
+        if (!current_session_id.empty())
+        {
+            logged_in = SessionManager::instance().find_user(
+                current_session_id, logged_in_username);
+        }
+    }
+
     std::string file_path;
     std::string status_line;
+    std::string cookie_header;
 
     if (malformed_request)
     {
@@ -591,6 +655,30 @@ bool HttpConnection::handle()
     {
         file_path = "root/404.html";
         status_line = "HTTP/1.1 404 Not Found\r\n";
+    }
+    else if (request_path == "/logout")
+    {
+        SessionManager::instance().remove(current_session_id);
+
+        cookie_header =
+            "Set-Cookie: session_id=; Path=/; HttpOnly; "
+            "SameSite=Lax; Max-Age=0\r\n";
+
+        file_path = "root/login.html";
+        status_line = "HTTP/1.1 200 OK\r\n";
+    }
+    else if (request_path == "/profile")
+    {
+        if (logged_in)
+        {
+            file_path = "private/profile.html";
+            status_line = "HTTP/1.1 200 OK\r\n";
+        }
+        else
+        {
+            file_path = "root/login.html";
+            status_line = "HTTP/1.1 403 Forbidden\r\n";
+        }
     }
     else if (method == "POST" && request_path == "/register")
     {
@@ -621,8 +709,24 @@ bool HttpConnection::handle()
 
         if (result == AccountRepository::LoginResult::Verified)
         {
-            file_path = "root/login_success.html";
-            status_line = "HTTP/1.1 200 OK\r\n";
+            std::string session_id;
+
+            if (SessionManager::instance().create(username, session_id))
+            {
+                cookie_header =
+                    "Set-Cookie: session_id=" + session_id +
+                    "; Path=/; HttpOnly; SameSite=Lax; Max-Age=" +
+                    std::to_string(SessionManager::lifetime_seconds) +
+                    "\r\n";
+
+                file_path = "root/login_success.html";
+                status_line = "HTTP/1.1 200 OK\r\n";
+            }
+            else
+            {
+                file_path = "root/500.html";
+                status_line = "HTTP/1.1 500 Internal Server Error\r\n";
+            }
         }
         else if (result ==
                  AccountRepository::LoginResult::InvalidCredentials)
@@ -668,10 +772,16 @@ bool HttpConnection::handle()
     std::string response = status_line;
     response += "Content-Type: " + content_type + "\r\n";
     response += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+    response += cookie_header;
+
+    if (request_path == "/profile" || post_action)
+    {
+        response += "Cache-Control: no-store\r\n";
+    }
 
     if (method_not_allowed)
     {
-        if (account_action)
+        if (post_action)
         {
             response += "Allow: POST\r\n";
         }
