@@ -52,7 +52,7 @@ void ThreadPool::enqueue(std::function<void()> task)
     condition_.notify_one();
 }
 
-ThreadPool::~ThreadPool()
+void ThreadPool::shutdown()
 {
     {
         std::lock_guard<std::mutex> lock(task_mutex_);
@@ -68,4 +68,9 @@ ThreadPool::~ThreadPool()
             worker.join();
         }
     }
+}
+
+ThreadPool::~ThreadPool()
+{
+    shutdown();
 }

@@ -4,6 +4,9 @@
 #include "database/database_pool.h"
 
 #include <cstdlib>
+#include <iostream>
+#include <pthread.h>
+#include <signal.h>
 
 int main(int argc, char *argv[])
 {
@@ -11,6 +14,21 @@ int main(int argc, char *argv[])
 
     if (!config.parse(argc, argv))
     {
+        return 1;
+    }
+
+    sigset_t signal_mask;
+    sigemptyset(&signal_mask);
+    sigaddset(&signal_mask, SIGINT);
+    sigaddset(&signal_mask, SIGTERM);
+
+    int signal_error =
+        pthread_sigmask(SIG_BLOCK, &signal_mask, nullptr);
+
+    if (signal_error != 0)
+    {
+        std::cerr << "Failed to configure shutdown signals: "
+                  << signal_error << '\n';
         return 1;
     }
 

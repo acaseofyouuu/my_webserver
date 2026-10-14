@@ -16,6 +16,8 @@ public:
 
     void enqueue(std::function<void()> task);
 
+    void shutdown();
+
 private:
     void worker_loop();
 

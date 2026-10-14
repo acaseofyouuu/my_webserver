@@ -22,6 +22,7 @@ private:
     int idle_timeout_seconds_;
     int server_fd_;
     int epoll_fd_;
+    int signal_fd_;
     ThreadPool thread_pool_;
     std::unordered_map<int, std::chrono::steady_clock::time_point>
         client_last_active_;
