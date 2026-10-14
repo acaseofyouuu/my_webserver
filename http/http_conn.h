@@ -13,6 +13,7 @@ public:
 
 private:
     int client_fd_;
+    std::string request_buffer_;
     bool send_all(const std::string &data);
     bool read_request(std::string &request);
     bool parse_request_line(const std::string &request,
