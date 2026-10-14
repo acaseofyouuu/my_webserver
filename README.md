@@ -1,62 +1,77 @@
 # my_webserver
 
-Learning and Replicating a C++ Web Server Based on TinyWebServer
+基于 qinguoyi/TinyWebServer 学习复刻的 Linux C++17 Web 服务器。
+在之前亲手实现的注册登录、密码哈希、会话和个人页面基础上，完成原版的主要功能。
+代码沿用自己的类和模块，不是原版逐行拷贝。
 
-## 学习记录
+**先运行，再跟着请求读代码：** [启动指南](docs/run-guide.md) · [学习路线](docs/learning-guide.md) ·
+[原版功能对照](docs/feature-parity.md) · [验证记录](docs/validation.md)。
 
-- 已完成 Git 安装、仓库克隆和本地项目设置。
+## 已完成
 
-## 当前学习进度
+- 非阻塞 socket、epoll、EPOLLONESHOT，监听/连接 socket 的四种 LT/ET 组合。
+- 线程池；Reactor 和模拟 Proactor 两种事件处理模式。
+- HTTP 请求行/请求头/正文状态机，GET/POST、错误响应、keep-alive、连续请求。
+- 静态网页、CSS、图片、视频；mmap 映射文件，iovec 分散发送及部分发送续传。
+- MySQL 连接池、参数化 SQL、注册、登录、重复用户名处理。
+- 同步/异步日志、按日期/行数分卷、关闭日志开关。
+- 有序超时队列回收空闲及不完整请求连接，SIGINT/SIGTERM 收尾退出。
+- 保留自己的扩展：PBKDF2-SHA256 密码哈希、Cookie 会话、个人页面、退出登录。
+- 原版 Webbench 工具，以及隔离数据库的自动回归和 10500 连接测试。
 
-这是一个正在学习和复刻的项目，尚未完成 TinyWebServer 的全部功能。
-对照源码为 qinguoyi/TinyWebServer 的本地 `TinyWebServer-master` 版本。
+## 现在怎么运行
 
-已经实现：HTTP 请求与响应、静态文件及 CSS、错误页面、长连接、
-epoll 事件监听、线程池、空闲连接回收、启动参数、同步日志、
-MySQL 连接池、注册登录、密码哈希、会话与个人页面、退出登录、停止时收尾。
-
-2026-10-14 按**当前进度**对齐原版的注册登录入口与页面流程。
-未提前实现图片视频演示、异步日志、非阻塞 I/O、LT/ET 切换、
-Reactor/模拟 Proactor 切换或完整 HTTP 状态机。
-已有 epoll 和线程池不表示已经实现了这些进阶功能。
-
-详细对应关系、修改范围和后续学习边界见 [当前进度对照](docs/current-progress-alignment.md)。
-
-## 本地运行（Ubuntu / WSL）
-
-在项目目录编译：
+在 **Ubuntu / WSL** 中进入项目目录：
 
 ```sh
+cd /mnt/c/Users/17856/Documents/my_webserver
 make
-```
-
-沿用已有 MySQL 配置：本机 `qgydb` 数据库、`webserver` 用户。
-账号表结构在 `database/schema.sql`，数据库连接密码仍由环境变量传入。
-若当前 Ubuntu 终端还没有设置密码：
-
-```sh
-read -s -p 'MySQL webserver 用户的密码: ' WEBSERVER_DB_PASSWORD
+read -s -p 'MySQL webserver 用户密码: ' WEBSERVER_DB_PASSWORD
 echo
 export WEBSERVER_DB_PASSWORD
 ./server
 ```
 
-浏览器打开 `http://127.0.0.1:8080/`，可选择“新用户”或“已有账号”。
-这仍然使用自己已经创建的账号；无须重新初始化数据库。
-最初的 Hello 页面保留在 `/index.html`，以前的 `/login.html` 仍可使用。
+现有数据库 `qgydb` 和 `accounts` 表继续使用，不需要删除或重新建账号。
+浏览器打开 `http://127.0.0.1:8080/`，选择新用户或已有账号。
+登录后可以查看图片、播放视频、进入个人页面。按 Ctrl+C 停止。
 
-已有启动参数仍为 `-p` 端口、`-t` 线程数、`-i` 空闲秒数、`-s` 数据库连接数。
-默认值保持 8080、4、10、4，以保留当前的使用习惯。
-日志在 `logs/server.log`，按 Ctrl+C 停止。
+## 模式选择
 
-## 当前阶段回归验证
+```sh
+./server -p 8080 -t 4 -s 4 -i 10 -l 1 -m 3 -a 1
+./server -h
+```
+
+| 参数 | 含义 | 默认 |
+| --- | --- | --- |
+| `-p` | 监听端口 | 8080 |
+| `-t` | 工作线程数 | 4 |
+| `-s` | 数据库连接数 | 4 |
+| `-i` | 连接空闲超时（秒） | 10 |
+| `-l` | 0 同步日志，1 异步日志 | 0 |
+| `-m` | 0 LT/LT，1 LT/ET，2 ET/LT，3 ET/ET；前者为监听 socket | 0 |
+| `-a` | 0 模拟 Proactor，1 Reactor | 0 |
+| `-o` | 0 关闭 SO_LINGER，1 开启并设置 1 秒 | 0 |
+| `-c` | 0 打开日志，1 关闭日志 | 0 |
+
+数据库还可以通过 `WEBSERVER_DB_HOST`、`WEBSERVER_DB_USER`、`WEBSERVER_DB_NAME`、
+`WEBSERVER_DB_PORT` 配置。默认 localhost / webserver / qgydb / 3306。
+密码只通过 `WEBSERVER_DB_PASSWORD` 提供。
+
+## 验证
 
 ```sh
 sudo python3 tests/current_progress.py
+sudo python3 tests/full_regression.py --stress
 ```
 
-此测试要求本机 MySQL root 可以通过 Unix socket 登录。它编译一个测试入口，
-复用真实的 HTTP、WebServer、线程池、日志、账号和会话代码，
-在临时目录和随机端口运行；创建名称以 `webserver_alignment_` 开头的独立数据库，
-结束时清理。不会修改 `qgydb`、现有账号或 8080 上的服务。
-测试入口只将数据库换为测试库、空闲超时设为 1 秒；正式程序仍由 `make` 单独验证编译。
+测试使用本机 MySQL root 的 Unix socket 登录，新建随机命名的临时数据库、随机端口和临时资源目录；
+不访问已有账号，不占用 8080，结束后清理。完整的测试范围及限制见验证记录。
+
+## 项目来源与保留进度
+
+参考项目：[qinguoyi/TinyWebServer](https://github.com/qinguoyi/TinyWebServer)。
+本项目仍采用 Apache-2.0，独立 Webbench 工具保留 GPL-2.0 许可证，示例媒体来源见 [NOTICE](NOTICE)。
+自动完善前的学习进度提交为 `dc8ff6c`；已有 Git 历史保留，完成前另有源码 ZIP 备份。
+历史上的阶段对照保存在 `docs/current-progress-alignment.md`。

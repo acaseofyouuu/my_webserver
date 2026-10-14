@@ -1,35 +1,50 @@
 #pragma once
-
+#include "config.h"
+#include "http/http_conn.h"
 #include "threadpool/thread_pool.h"
 #include <chrono>
+#include <cstdint>
+#include <map>
+#include <memory>
 #include <mutex>
+#include <queue>
 #include <unordered_map>
-#include <cstddef>
 
 class WebServer
 {
 public:
-    WebServer(int port,
-              std::size_t thread_count,
-              int idle_timeout_seconds);
+    explicit WebServer(const Config &config);
+    WebServer(int port, std::size_t threads, int idle_seconds);
     ~WebServer();
-
     bool start();
     void run();
-
 private:
-    int port_;
-    int idle_timeout_seconds_;
-    int server_fd_;
-    int epoll_fd_;
-    int signal_fd_;
+    using Next = HttpConnection::Next;
+    using Clock = std::chrono::steady_clock;
+    using Timers = std::multimap<Clock::time_point, std::uint64_t>;
+    struct Client {
+        std::shared_ptr<HttpConnection> http;
+        bool busy = false, expired = false;
+        Next interest = Next::Read;
+        Timers::iterator timer;
+    };
+    struct Completion { std::uint64_t id; Next next; };
+    Config config_;
+    int server_fd_ = -1, epoll_fd_ = -1, signal_fd_ = -1, completion_fd_ = -1;
     ThreadPool thread_pool_;
-    std::unordered_map<int, std::chrono::steady_clock::time_point>
-        client_last_active_;
-
-    std::mutex client_activity_mutex_;
-
-    void mark_client_idle(int client_fd);
-    void remove_client_from_idle(int client_fd);
-    void close_idle_connections();
+    std::uint64_t next_id_ = 3; // 0 listener, 1 signalfd, 2 eventfd
+    std::unordered_map<std::uint64_t, Client> clients_;
+    Timers timers_;
+    std::mutex completion_mutex_;
+    std::queue<Completion> completions_;
+    bool stopping_ = false;
+    Clock::time_point stop_deadline_;
+    bool add_fd(int fd, std::uint64_t id, unsigned events);
+    void accept_clients();
+    void dispatch(std::uint64_t id, Next action);
+    void apply_result(std::uint64_t id, Next next);
+    void drain_completions();
+    void close_client(std::uint64_t id);
+    void touch(std::uint64_t id);
+    void expire_clients();
 };

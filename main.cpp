@@ -7,8 +7,9 @@
 #include <iostream>
 #include <pthread.h>
 #include <signal.h>
+#include <exception>
 
-int main(int argc, char *argv[])
+int run_application(int argc, char *argv[])
 {
     Config config;
 
@@ -16,6 +17,7 @@ int main(int argc, char *argv[])
     {
         return 1;
     }
+    if (config.help) return 0;
 
     sigset_t signal_mask;
     sigemptyset(&signal_mask);
@@ -32,7 +34,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    if (!Logger::instance().initialize("logs/server.log"))
+    if (!Logger::instance().initialize("logs/server.log", config.log_mode == 1, config.close_log == 0))
     {
         return 1;
     }
@@ -44,8 +46,7 @@ int main(int argc, char *argv[])
 
     if (database_password == nullptr)
     {
-        Logger::instance().error(
-            "WEBSERVER_DB_PASSWORD is not set");
+        std::cerr << "WEBSERVER_DB_PASSWORD is not set\n";
         return 1;
     }
 
@@ -75,9 +76,7 @@ int main(int argc, char *argv[])
             "Database connection borrowed successfully");
     }
 
-    WebServer server(config.port,
-                     config.thread_count,
-                     config.idle_timeout_seconds);
+    WebServer server(config);
 
     if (!server.start())
     {
@@ -88,4 +87,14 @@ int main(int argc, char *argv[])
     server.run();
 
     return 0;
+}
+
+int main(int argc, char *argv[])
+{
+    try { return run_application(argc, argv); }
+    catch (const std::exception &error)
+    {
+        std::cerr << "Server failed: " << error.what() << '\n';
+        return 1;
+    }
 }

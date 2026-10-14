@@ -181,7 +181,7 @@ def run():
                     time.sleep(2.3)
                     check(idle.recv(1) == b"", "idle connection timeout preserved")
                 for path in ("/5", "/6", "/7"):
-                    check(request(port, path)[0] == 404, f"future route {path} intentionally not implemented")
+                    check(request(port, path)[0] == 200, f"completed media route {path}")
                 stored = sql(f"SELECT password_hash FROM `{DB}`.accounts WHERE username='original_user'")
                 check(stored.startswith("pbkdf2-sha256$") and len(stored) == 118,
                       "original form still stores password hash")

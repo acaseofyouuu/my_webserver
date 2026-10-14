@@ -3,15 +3,12 @@
 #include "../database/account_repository.h"
 #include "../session/session_manager.h"
 
-#include <fstream>
-#include <iostream>
 #include <sstream>
 #include <string>
 #include <unistd.h>
 #include <filesystem>
 #include <cerrno>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <cctype>
 #include <charconv>
 
@@ -200,112 +197,17 @@ namespace
             return "image/x-icon";
         }
 
+        if (extension == ".mp4") return "video/mp4";
+        if (extension == ".avi") return "video/x-msvideo";
         return "application/octet-stream";
     }
 }
 
-HttpConnection::HttpConnection(int client_fd)
-    : client_fd_(client_fd)
-{
-}
-
-bool HttpConnection::read_request(std::string &request)
-{
-    constexpr std::size_t max_request_size = 16 * 1024;
-    char buffer[4096];
-
-    while (request.find("\r\n\r\n") == std::string::npos)
-    {
-        ssize_t bytes_read = recv(client_fd_, buffer, sizeof(buffer), 0);
-
-        if (bytes_read == -1)
-        {
-            if (errno == EINTR)
-            {
-                continue;
-            }
-
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-            {
-                std::cerr << "Client request timed out\n";
-                return false;
-            }
-
-            std::cerr << "Failed to read client request\n";
-            return false;
-        }
-
-        if (bytes_read == 0)
-        {
-            std::cout << "Client closed the connection before sending a complete request\n";
-            return false;
-        }
-
-        request.append(buffer, static_cast<std::size_t>(bytes_read));
-
-        if (request.size() > max_request_size)
-        {
-            std::cerr << "HTTP request is too large\n";
-            return false;
-        }
-    }
-    return true;
-}
-
-bool HttpConnection::read_body(std::string &request,
-                               std::size_t body_length)
-{
-    constexpr std::size_t max_request_size = 16 * 1024;
-    const std::size_t header_end = request.find("\r\n\r\n");
-
-    if (header_end == std::string::npos)
-    {
-        return false;
-    }
-
-    const std::size_t body_start = header_end + 4;
-
-    if (body_start > max_request_size ||
-        body_length > max_request_size - body_start)
-    {
-        return false;
-    }
-
-    char buffer[4096];
-
-    while (request.size() < body_start + body_length)
-    {
-        std::size_t remaining =
-            body_start + body_length - request.size();
-
-        std::size_t to_read =
-            remaining < sizeof(buffer) ? remaining : sizeof(buffer);
-
-        ssize_t bytes_read = recv(client_fd_, buffer, to_read, 0);
-
-        if (bytes_read == -1)
-        {
-            if (errno == EINTR)
-            {
-                continue;
-            }
-
-            std::cerr << "Failed to read request body\n";
-            return false;
-        }
-
-        if (bytes_read == 0)
-        {
-            std::cerr << "Client closed before request body was complete\n";
-            return false;
-        }
-
-        request.append(buffer, static_cast<std::size_t>(bytes_read));
-    }
-
-    return true;
-}
-
+#include <algorithm>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/uio.h>
 bool HttpConnection::parse_request_line(const std::string &request,
                                         std::string &method,
                                         std::string &request_path,
@@ -331,6 +233,14 @@ bool HttpConnection::parse_request_line(const std::string &request,
         return false;
     }
 
+    for (const std::string prefix : {"http://", "https://"})
+    {
+        if (request_path.compare(0, prefix.size(), prefix) == 0)
+        {
+            auto slash = request_path.find('/', prefix.size());
+            request_path = slash == std::string::npos ? "/" : request_path.substr(slash);
+        }
+    }
     return true;
 }
 
@@ -391,6 +301,8 @@ bool HttpConnection::parse_headers(
             header_value.erase(header_value.begin());
         }
 
+        while (!header_value.empty() && (header_value.back() == ' ' || header_value.back() == '\t'))
+            header_value.pop_back();
         headers[header_name] = header_value;
         line_start = line_end + 2;
     }
@@ -422,72 +334,201 @@ bool HttpConnection::should_keep_alive(
         }
     }
 
-    if (http_version == "HTTP/1.1")
+    std::istringstream tokens(connection_value);
+    std::string token;
+    bool explicit_keep_alive = false;
+    while (std::getline(tokens, token, ','))
     {
-        return connection_value != "close";
+        const auto first = token.find_first_not_of(" \t");
+        if (first == std::string::npos) continue;
+        token = token.substr(first, token.find_last_not_of(" \t") - first + 1);
+        if (token == "close") return false;
+        if (token == "keep-alive") explicit_keep_alive = true;
     }
-
-    return connection_value == "keep-alive";
+    return http_version == "HTTP/1.1" || explicit_keep_alive;
 }
 
-bool HttpConnection::send_all(const std::string &data)
+HttpConnection::HttpConnection(int client_fd) : client_fd_(client_fd) {}
+HttpConnection::~HttpConnection()
 {
-    std::size_t total_sent = 0;
-
-    while (total_sent < data.size())
+    release_file();
+    if (client_fd_ >= 0) close(client_fd_);
+}
+void HttpConnection::release_file()
+{
+    if (mapped_file_) munmap(mapped_file_, file_size_);
+    mapped_file_ = nullptr;
+    file_size_ = 0;
+}
+bool HttpConnection::map_file(const std::string &path)
+{
+    release_file();
+    int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) return false;
+    struct stat st{};
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0)
+    { close(fd); return false; }
+    file_size_ = static_cast<std::size_t>(st.st_size);
+    if (file_size_ != 0)
     {
-        ssize_t bytes_sent = send(client_fd_,
-                                  data.data() + total_sent,
-                                  data.size() - total_sent,
-                                  MSG_NOSIGNAL);
-
-        if (bytes_sent == -1)
-        {
-            if (errno == EINTR)
-            {
-                continue;
-            }
-
-            std::cerr << "Failed to send response\n";
-            return false;
-        }
-
-        if (bytes_sent == 0)
-        {
-            std::cerr << "Connection closed while sending response\n";
-            return false;
-        }
-
-        total_sent += static_cast<std::size_t>(bytes_sent);
+        mapped_file_ = mmap(nullptr, file_size_, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (mapped_file_ == MAP_FAILED)
+        { mapped_file_ = nullptr; file_size_ = 0; close(fd); return false; }
     }
-
+    close(fd);
     return true;
 }
-
-bool HttpConnection::handle()
+void HttpConnection::reset_parser()
 {
-    std::cout << "Client connected , fd = " << client_fd_ << '\n';
-
-    timeval receive_timeout{};
-    receive_timeout.tv_sec = 5;
-    receive_timeout.tv_usec = 0;
-
-    if (setsockopt(client_fd_, SOL_SOCKET,
-                   SO_RCVTIMEO,
-                   &receive_timeout,
-                   sizeof(receive_timeout)) == -1)
+    parse_state_ = ParseState::RequestLine;
+    parse_cursor_ = frame_size_ = body_size_ = 0;
+    frame_headers_.clear();
+    invalid_frame_ = false;
+}
+bool HttpConnection::reject_request()
+{
+    invalid_frame_ = true;
+    frame_size_ = request_buffer_.size();
+    return true;
+}
+bool HttpConnection::advance_parser()
+{
+    constexpr std::size_t limit = 16 * 1024;
+    if (invalid_frame_ || frame_size_) return true;
+    while (parse_state_ != ParseState::Body)
     {
-        std::cerr << "Failed to set client receive timeout\n";
-        return false;
+        auto end = request_buffer_.find("\r\n", parse_cursor_);
+        if (end == std::string::npos)
+        {
+            auto lf = request_buffer_.find('\n', parse_cursor_);
+            if (lf != std::string::npos || request_buffer_.size() >= limit) return reject_request();
+            return false;
+        }
+        const std::string line = request_buffer_.substr(parse_cursor_, end - parse_cursor_);
+        parse_cursor_ = end + 2;
+        if (parse_state_ == ParseState::RequestLine)
+        {
+            std::string method, path, version;
+            if (!parse_request_line(line + "\r\n", method, path, version) ||
+                (version != "HTTP/1.0" && version != "HTTP/1.1")) return reject_request();
+            parse_state_ = ParseState::Headers;
+        }
+        else if (line.empty())
+        {
+            if (frame_headers_.count("transfer-encoding") || frame_headers_.count("expect"))
+                return reject_request();
+            auto length = frame_headers_.find("content-length");
+            if (length != frame_headers_.end())
+            {
+                const auto &value = length->second;
+                auto result = std::from_chars(value.data(), value.data() + value.size(), body_size_);
+                if (result.ec != std::errc{} || result.ptr != value.data() + value.size() ||
+                    body_size_ > 8192) return reject_request();
+            }
+            if (parse_cursor_ + body_size_ > limit) return reject_request();
+            parse_state_ = ParseState::Body;
+        }
+        else
+        {
+            auto colon = line.find(':');
+            if (colon == std::string::npos || colon == 0) return reject_request();
+            std::string key = line.substr(0, colon);
+            for (char &ch : key)
+            {
+                if (!std::isalnum(static_cast<unsigned char>(ch)) &&
+                    std::string("!#$%&'*+-.^_`|~").find(ch) == std::string::npos) return reject_request();
+                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            }
+            std::string value = line.substr(colon + 1);
+            for (unsigned char ch : value)
+                if ((ch < 32 && ch != '\t') || ch == 127) return reject_request();
+            const auto begin = value.find_first_not_of(" \t");
+            value = begin == std::string::npos ? "" : value.substr(begin, value.find_last_not_of(" \t") - begin + 1);
+            if (!frame_headers_.emplace(key, value).second) return reject_request();
+        }
     }
-
-    std::string request;
-
-    if (!read_request(request))
+    if (request_buffer_.size() < parse_cursor_ + body_size_) return false;
+    frame_size_ = parse_cursor_ + body_size_;
+    return true;
+}
+HttpConnection::Next HttpConnection::read_ready(bool edge_triggered)
+{
+    if (advance_parser()) return Next::Process;
+    char data[4096];
+    do
     {
-        return false;
+        auto space = 16 * 1024 - request_buffer_.size();
+        if (space == 0) { reject_request(); return Next::Process; }
+        auto size = recv(client_fd_, data, std::min(space, sizeof(data)), 0);
+        if (size > 0)
+        {
+            request_buffer_.append(data, static_cast<std::size_t>(size));
+            if (advance_parser()) return Next::Process;
+            if (!edge_triggered) return Next::Read;
+        }
+        else if (size == 0)
+        {
+            peer_closed_ = true;
+            if (request_buffer_.empty()) return Next::Close;
+            reject_request();
+            return Next::Process;
+        }
+        else if (errno == EINTR) continue;
+        else if (errno == EAGAIN || errno == EWOULDBLOCK) return Next::Read;
+        else return Next::Close;
+    } while (true);
+}
+HttpConnection::Next HttpConnection::process()
+{
+    if (!advance_parser()) return Next::Read;
+    std::string request = invalid_frame_ ? "INVALID\r\n\r\n" : request_buffer_.substr(0, frame_size_);
+    request_buffer_.erase(0, frame_size_);
+    build_response(request);
+    reset_parser();
+    return Next::Write;
+}
+HttpConnection::Next HttpConnection::write_ready()
+{
+    const std::size_t body_size = mapped_file_ ? file_size_ : fallback_body_.size();
+    const char *body = mapped_file_ ? static_cast<const char *>(mapped_file_) : fallback_body_.data();
+    const std::size_t total = response_header_.size() + body_size;
+    std::size_t budget = 256 * 1024;
+    while (sent_ < total && budget)
+    {
+        iovec vectors[2]{};
+        int count = 0;
+        if (sent_ < response_header_.size())
+        {
+            vectors[count++] = {response_header_.data() + sent_, std::min(response_header_.size() - sent_, budget)};
+            auto remaining = budget - vectors[0].iov_len;
+            if (remaining && body_size) vectors[count++] = {const_cast<char *>(body), std::min(body_size, remaining)};
+        }
+        else
+        {
+            auto offset = sent_ - response_header_.size();
+            vectors[count++] = {const_cast<char *>(body + offset), std::min(body_size - offset, budget)};
+        }
+        // iovec 分散写；MSG_NOSIGNAL 使对端断连不会杀死整个进程。
+        msghdr message{};
+        message.msg_iov = vectors;
+        message.msg_iovlen = count;
+        auto size = sendmsg(client_fd_, &message, MSG_NOSIGNAL);
+        if (size > 0) { sent_ += size; budget -= size; }
+        else if (size < 0 && errno == EINTR) continue;
+        else if (size < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return Next::Write;
+        else return Next::Close;
     }
+    if (sent_ < total) return Next::Write;
+    release_file();
+    response_header_.clear();
+    fallback_body_.clear();
+    sent_ = 0;
+    if (!keep_alive_) return Next::Close;
+    return advance_parser() ? Next::Process : Next::Read;
+}
 
+void HttpConnection::build_response(const std::string &request)
+{
     std::string method;
     std::string request_path;
     std::string http_version;
@@ -502,19 +543,9 @@ bool HttpConnection::handle()
     bool missing_host = request_line_valid &&
                         headers_valid &&
                         http_version == "HTTP/1.1" &&
-                        headers.find("host") == headers.end();
+                        (headers.find("host") == headers.end() || headers["host"].empty());
 
-    std::cout << "Method: " << method << '\n';
-    std::cout << "Path: " << request_path << '\n';
-    std::cout << "HTTP version: " << http_version << '\n';
-
-    Logger::instance().info(
-        "HTTP request: " +
-        method + " " +
-        request_path + " " +
-        http_version);
-
-    bool malformed_request = !request_line_valid ||
+    bool malformed_request = invalid_frame_ || !request_line_valid ||
                              !headers_valid ||
                              missing_host ||
                              (http_version != "HTTP/1.0" && http_version != "HTTP/1.1");
@@ -547,11 +578,6 @@ bool HttpConnection::handle()
             }
             else
             {
-                if (!read_body(request, body_length))
-                {
-                    return false;
-                }
-
                 const std::size_t body_start =
                     request.find("\r\n\r\n") + 4;
 
@@ -560,11 +586,23 @@ bool HttpConnection::handle()
         }
     }
 
+    // 查询参数不是文件路径；路径解码后再校验。
+    request_path = request_path.substr(0, request_path.find('?'));
+    std::string decoded_path, encoded_path;
+    for (char ch : request_path) encoded_path += ch == '+' ? "%2B" : std::string(1, ch);
+    if (!decode_form_component(encoded_path, decoded_path)) malformed_request = true;
+    else request_path = decoded_path;
+    if (request_path.empty() || request_path.find_first_of("\r\n") != std::string::npos ||
+        request_path.find('\0') != std::string::npos) malformed_request = true;
+    if (!malformed_request)
+        Logger::instance().info("HTTP request: " + method + " " + request_path);
+
     // 原版的表单地址复用已有账号逻辑，不另建一套账号或会话。
     const bool original_account_action =
         request_path == "/2" || request_path == "/2CGISQL.cgi" ||
         request_path == "/3" || request_path == "/3CGISQL.cgi";
-    const bool page_navigation = request_path == "/0" || request_path == "/1";
+    const bool page_navigation = request_path == "/0" || request_path == "/1" ||
+        request_path == "/5" || request_path == "/6" || request_path == "/7";
 
     if (request_path == "/2" || request_path == "/2CGISQL.cgi")
     {
@@ -618,7 +656,7 @@ bool HttpConnection::handle()
     }
 
     bool keep_alive =
-        !malformed_request &&
+        !malformed_request && !peer_closed_ &&
         should_keep_alive(http_version, headers);
 
     bool method_not_allowed =
@@ -675,7 +713,10 @@ bool HttpConnection::handle()
     }
     else if (page_navigation)
     {
-        file_path = request_path == "/0" ? "root/register.html" : "root/log.html";
+        const std::unordered_map<std::string, std::string> pages{
+            {"/0", "root/register.html"}, {"/1", "root/log.html"},
+            {"/5", "root/picture.html"}, {"/6", "root/video.html"}, {"/7", "root/fans.html"}};
+        file_path = pages.at(request_path);
         status_line = "HTTP/1.1 200 OK\r\n";
     }
     else if (request_path == "/logout")
@@ -775,74 +816,40 @@ bool HttpConnection::handle()
         status_line = "HTTP/1.1 200 OK\r\n";
     }
 
-    std::ifstream file(file_path, std::ios::binary);
-
-    if (!file.is_open() && status_line == "HTTP/1.1 200 OK\r\n")
+    if (file_path.compare(0, 5, "root/") == 0)
+    {
+        std::error_code error;
+        auto root = std::filesystem::canonical("root", error);
+        auto target = std::filesystem::weakly_canonical(file_path, error);
+        auto relative = target.lexically_relative(root);
+        if (error || relative.empty() || *relative.begin() == "..")
+        { file_path = "root/404.html"; status_line = "HTTP/1.1 404 Not Found\r\n"; }
+    }
+    fallback_body_.clear();
+    bool opened = map_file(file_path);
+    if (!opened && status_line == "HTTP/1.1 200 OK\r\n")
     {
         file_path = "root/404.html";
         status_line = "HTTP/1.1 404 Not Found\r\n";
-
-        file.clear();
-        file.open(file_path, std::ios::binary);
+        opened = map_file(file_path);
     }
-
-    if (!file.is_open())
+    if (!opened)
     {
-        std::cerr << "Failed to open " << file_path << '\n';
-        return false;
+        status_line = "HTTP/1.1 500 Internal Server Error\r\n";
+        fallback_body_ = "Internal Server Error\n";
+        keep_alive = false;
     }
-
-    std::ostringstream body_stream;
-    body_stream << file.rdbuf();
-
-    std::string body = body_stream.str();
-    std::string content_type = get_content_type(file_path);
-
-    std::string response = status_line;
-    response += "Content-Type: " + content_type + "\r\n";
-    response += "Content-Length: " + std::to_string(body.size()) + "\r\n";
-    response += cookie_header;
-
-    if (request_path == "/profile" || post_action)
-    {
-        response += "Cache-Control: no-store\r\n";
-    }
-
+    auto body_size = opened ? file_size_ : fallback_body_.size();
+    response_header_ = status_line;
+    response_header_ += "Content-Type: " + get_content_type(file_path) + "\r\n";
+    response_header_ += "Content-Length: " + std::to_string(body_size) + "\r\n";
+    response_header_ += cookie_header;
+    if (request_path == "/profile" || post_action) response_header_ += "Cache-Control: no-store\r\n";
     if (method_not_allowed)
-    {
-        if (post_action)
-        {
-            response += "Allow: POST\r\n";
-        }
-        else if (page_navigation)
-        {
-            response += "Allow: GET, POST\r\n";
-        }
-        else
-        {
-            response += "Allow: GET\r\n";
-        }
-    }
-
-    if (keep_alive)
-    {
-        response += "Connection: keep-alive\r\n";
-    }
-    else
-    {
-        response += "Connection: close\r\n";
-    }
-    response += "\r\n";
-    response += body;
-
-    if (!send_all(response))
-    {
-        return false;
-    }
-
-    Logger::instance().info(
-        "HTTP response sent: " +
-        status_line.substr(0, status_line.size() - 2));
-
-    return keep_alive;
+        response_header_ += post_action ? "Allow: POST\r\n" :
+            (page_navigation ? "Allow: GET, POST\r\n" : "Allow: GET\r\n");
+    response_header_ += keep_alive ? "Connection: keep-alive\r\n\r\n" : "Connection: close\r\n\r\n";
+    keep_alive_ = keep_alive;
+    sent_ = 0;
+    Logger::instance().info("HTTP response prepared: " + status_line.substr(0, status_line.size() - 2));
 }

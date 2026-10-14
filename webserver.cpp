@@ -1,324 +1,207 @@
 #include "webserver.h"
 #include "log/logger.h"
-#include "http/http_conn.h"
-
+#include <cerrno>
+#include <csignal>
+#include <cstring>
 #include <iostream>
-#include <sys/socket.h>
-#include <unistd.h>
 #include <netinet/in.h>
 #include <sys/epoll.h>
-#include <string>
-#include <signal.h>
+#include <sys/eventfd.h>
 #include <sys/signalfd.h>
-#include <cerrno>
+#include <sys/socket.h>
+#include <unistd.h>
 
-void WebServer::mark_client_idle(int client_fd)
-{
-    std::lock_guard<std::mutex> lock(client_activity_mutex_);
-
-    client_last_active_[client_fd] =
-        std::chrono::steady_clock::now();
-}
-
-void WebServer::remove_client_from_idle(int client_fd)
-{
-    std::lock_guard<std::mutex> lock(client_activity_mutex_);
-
-    client_last_active_.erase(client_fd);
-}
-
-void WebServer::close_idle_connections()
-{
-    auto idle_timeout =
-        std::chrono::seconds(idle_timeout_seconds_);
-
-    auto now = std::chrono::steady_clock::now();
-
-    std::lock_guard<std::mutex> lock(client_activity_mutex_);
-
-    for (auto iterator = client_last_active_.begin();
-         iterator != client_last_active_.end();)
-    {
-        auto idle_time = now - iterator->second;
-
-        if (idle_time >= idle_timeout)
-        {
-            int client_fd = iterator->first;
-
-            epoll_ctl(epoll_fd_,
-                      EPOLL_CTL_DEL,
-                      client_fd,
-                      nullptr);
-
-            close(client_fd);
-
-            Logger::instance().info(
-                "Closed idle client, fd = " +
-                std::to_string(client_fd));
-
-            iterator = client_last_active_.erase(iterator);
-        }
-        else
-        {
-            ++iterator;
-        }
-    }
-}
-
-WebServer::WebServer(int port,
-                     std::size_t thread_count,
-                     int idle_timeout_seconds)
-    : port_(port),
-      idle_timeout_seconds_(idle_timeout_seconds),
-      server_fd_(-1),
-      epoll_fd_(-1),
-      signal_fd_(-1),
-      thread_pool_(thread_count)
-{
-}
-
+WebServer::WebServer(const Config &config) : config_(config), thread_pool_(config.thread_count) {}
+WebServer::WebServer(int port, std::size_t threads, int idle_seconds)
+    : WebServer([&] { Config c; c.port = port; c.thread_count = threads; c.idle_timeout_seconds = idle_seconds; return c; }()) {}
 WebServer::~WebServer()
 {
+    // 先等任务退出，再释放连接；工作线程不会使用已关闭或被复用的 fd。
     thread_pool_.shutdown();
-
-    for (const auto &entry : client_last_active_)
-    {
-        close(entry.first);
-    }
-
-    client_last_active_.clear();
-
-    if (signal_fd_ != -1)
-    {
-        close(signal_fd_);
-    }
-
-    if (epoll_fd_ != -1)
-    {
-        close(epoll_fd_);
-    }
-
-    if (server_fd_ != -1)
-    {
-        close(server_fd_);
-    }
+    clients_.clear();
+    for (int fd : {server_fd_, signal_fd_, completion_fd_, epoll_fd_}) if (fd >= 0) close(fd);
 }
-
+bool WebServer::add_fd(int fd, std::uint64_t id, unsigned events)
+{
+    epoll_event event{};
+    event.events = events;
+    event.data.u64 = id;
+    return epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &event) == 0;
+}
 bool WebServer::start()
 {
-    server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-
-    if (server_fd_ == -1)
-    {
-        std::cerr << "Failed to create socket\n";
-        return false;
-    }
-
-    std::cout << "Socket created successfully , fd = " << server_fd_ << '\n';
-
-    int reuse_address = 1;
-
-    if (setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &reuse_address, sizeof(reuse_address)) == -1)
-    {
-        std::cerr << "Failed to set socket options\n";
-        return false;
-    }
-
-    sockaddr_in server_address{};
-
-    server_address.sin_family = AF_INET;
-    server_address.sin_addr.s_addr = htonl(INADDR_ANY);
-    server_address.sin_port = htons(port_);
-
-    if (bind(server_fd_, reinterpret_cast<sockaddr *>(&server_address), sizeof(server_address)) == -1)
-    {
-        std::cerr << "Failed to bind socket\n";
-        return false;
-    }
-
-    std::cout << "Socket bound to port " << port_ << '\n';
-
-    if (listen(server_fd_, 10) == -1)
-    {
-        std::cerr << "Failed to listen on socket\n";
-        return false;
-    }
-
-    Logger::instance().info(
-        "Server is listening on port " + std::to_string(port_));
-
-    epoll_fd_ = epoll_create1(0);
-
-    if (epoll_fd_ == -1)
-    {
-        std::cerr << "Failed to create epoll instance\n";
-        return false;
-    }
-
-    sigset_t signal_mask;
-    sigemptyset(&signal_mask);
-    sigaddset(&signal_mask, SIGINT);
-    sigaddset(&signal_mask, SIGTERM);
-
-    signal_fd_ = signalfd(
-        -1, &signal_mask, SFD_NONBLOCK | SFD_CLOEXEC);
-
-    if (signal_fd_ == -1)
-    {
-        Logger::instance().error("Failed to create signal fd");
-        return false;
-    }
-
-    epoll_event signal_event{};
-    signal_event.events = EPOLLIN;
-    signal_event.data.fd = signal_fd_;
-
-    if (epoll_ctl(epoll_fd_,
-                  EPOLL_CTL_ADD,
-                  signal_fd_,
-                  &signal_event) == -1)
-    {
-        Logger::instance().error("Failed to add signal fd to epoll");
-        return false;
-    }
-
-    epoll_event server_event{};
-
-    server_event.events = EPOLLIN;
-    server_event.data.fd = server_fd_;
-
-    if (epoll_ctl(epoll_fd_,
-                  EPOLL_CTL_ADD,
-                  server_fd_,
-                  &server_event) == -1)
-    {
-        std::cerr << "Failed to add server socket to epoll\n";
-        return false;
-    }
-
+    server_fd_ = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
+    completion_fd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    sigset_t mask;
+    sigemptyset(&mask); sigaddset(&mask, SIGINT); sigaddset(&mask, SIGTERM);
+    signal_fd_ = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
+    if (server_fd_ < 0 || epoll_fd_ < 0 || completion_fd_ < 0 || signal_fd_ < 0) return false;
+    int reuse = 1;
+    if (setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse))) return false;
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_ANY);
+    address.sin_port = htons(config_.port);
+    if (bind(server_fd_, reinterpret_cast<sockaddr *>(&address), sizeof(address)) || listen(server_fd_, 4096))
+    { std::cerr << "Listen failed: " << std::strerror(errno) << '\n'; return false; }
+    if (!add_fd(server_fd_, 0, EPOLLIN | (config_.trigger_mode >= 2 ? static_cast<unsigned>(EPOLLET) : 0u)) ||
+        !add_fd(signal_fd_, 1, EPOLLIN) || !add_fd(completion_fd_, 2, EPOLLIN)) return false;
+    Logger::instance().info("Server is listening on port " + std::to_string(config_.port) +
+        ", actor=" + std::to_string(config_.actor_model) + ", trigger=" + std::to_string(config_.trigger_mode));
     return true;
 }
-
-void WebServer::run()
+void WebServer::accept_clients()
 {
-    constexpr int max_events = 64;
-    epoll_event events[max_events]{};
-
-    while (true)
-    {
-        int event_count =
-            epoll_wait(epoll_fd_, events, max_events, 1000);
-
-        if (event_count == -1)
+    do {
+        int fd = accept4(server_fd_, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+        if (fd < 0)
         {
-            std::cerr << "Failed to wait for epoll events\n";
+            if (errno == EINTR) continue;
+            if (errno != EAGAIN && errno != EWOULDBLOCK) Logger::instance().error("accept failed");
             return;
         }
-
-        for (int i = 0; i < event_count; ++i)
+        if (clients_.size() >= 65536) { close(fd); continue; }
+        linger setting{config_.linger_mode, config_.linger_mode ? 1 : 0};
+        if (setsockopt(fd, SOL_SOCKET, SO_LINGER, &setting, sizeof(setting))) { close(fd); continue; }
+        const auto id = next_id_++;
+        auto http = std::make_shared<HttpConnection>(fd);
+        auto timer = timers_.emplace(Clock::now() + std::chrono::seconds(config_.idle_timeout_seconds), id);
+        clients_.emplace(id, Client{http, false, false, Next::Read, timer});
+        unsigned flags = EPOLLIN | EPOLLRDHUP | EPOLLONESHOT;
+        if (config_.trigger_mode % 2) flags |= EPOLLET;
+        if (!add_fd(fd, id, flags)) close_client(id);
+        if (config_.trigger_mode < 2) return;
+    } while (!stopping_);
+}
+void WebServer::touch(std::uint64_t id)
+{
+    auto &client = clients_.at(id);
+    if (client.timer != timers_.end()) timers_.erase(client.timer);
+    client.timer = timers_.emplace(Clock::now() + std::chrono::seconds(config_.idle_timeout_seconds), id);
+}
+void WebServer::close_client(std::uint64_t id)
+{
+    auto it = clients_.find(id);
+    if (it == clients_.end()) return;
+    if (it->second.busy) { it->second.expired = true; return; }
+    epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, it->second.http->fd(), nullptr);
+    if (it->second.timer != timers_.end()) timers_.erase(it->second.timer);
+    clients_.erase(it);
+}
+void WebServer::expire_clients()
+{
+    while (!timers_.empty() && timers_.begin()->first <= Clock::now())
+    {
+        auto id = timers_.begin()->second;
+        timers_.erase(timers_.begin());
+        clients_.at(id).timer = timers_.end();
+        close_client(id);
+    }
+}
+void WebServer::dispatch(std::uint64_t id, Next action)
+{
+    auto &client = clients_.at(id);
+    client.busy = true;
+    auto http = client.http;
+    bool accepted = thread_pool_.enqueue([this, http, id, action] {
+        Next result = Next::Close;
+        try {
+            if (action == Next::Read) result = http->read_ready(config_.trigger_mode % 2);
+            else if (action == Next::Write) result = http->write_ready();
+            else result = Next::Process;
+            if (result == Next::Process) result = http->process();
+        } catch (const std::exception &e) { Logger::instance().error(e.what()); result = Next::Close; }
+        catch (...) { result = Next::Close; }
         {
-            int ready_fd = events[i].data.fd;
-
-            if (ready_fd == signal_fd_)
+            std::lock_guard<std::mutex> lock(completion_mutex_);
+            completions_.push({id, result});
+        }
+        std::uint64_t wake = 1;
+        while (write(completion_fd_, &wake, sizeof(wake)) < 0 && errno == EINTR) {}
+    });
+    if (!accepted) { client.busy = false; close_client(id); }
+}
+void WebServer::apply_result(std::uint64_t id, Next next)
+{
+    auto it = clients_.find(id);
+    if (it == clients_.end()) return;
+    auto &client = it->second;
+    if (client.expired || next == Next::Close || (stopping_ && (next == Next::Read || next == Next::Process)))
+    { close_client(id); return; }
+    if (next == Next::Process) { dispatch(id, next); return; }
+    client.interest = next;
+    epoll_event event{};
+    event.data.u64 = id;
+    event.events = EPOLLONESHOT | EPOLLRDHUP | (next == Next::Write ? EPOLLOUT : EPOLLIN);
+    if (config_.trigger_mode % 2) event.events |= EPOLLET;
+    if (epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, client.http->fd(), &event)) close_client(id);
+}
+void WebServer::drain_completions()
+{
+    std::uint64_t count;
+    while (read(completion_fd_, &count, sizeof(count)) < 0 && errno == EINTR) {}
+    std::queue<Completion> ready;
+    { std::lock_guard<std::mutex> lock(completion_mutex_); ready.swap(completions_); }
+    while (!ready.empty())
+    {
+        auto completion = ready.front(); ready.pop();
+        auto it = clients_.find(completion.id);
+        if (it == clients_.end()) continue;
+        it->second.busy = false;
+        apply_result(completion.id, completion.next);
+    }
+}
+void WebServer::run()
+{
+    epoll_event events[256];
+    while (!stopping_ || !clients_.empty())
+    {
+        if (stopping_ && Clock::now() >= stop_deadline_) break;
+        int count = epoll_wait(epoll_fd_, events, 256, 100);
+        if (count < 0) { if (errno == EINTR) continue; Logger::instance().error("epoll_wait failed"); break; }
+        for (int i = 0; i < count; ++i)
+        {
+            auto id = events[i].data.u64;
+            auto flags = events[i].events;
+            if (id == 0) { if (!stopping_) accept_clients(); continue; }
+            if (id == 1)
             {
-                signalfd_siginfo signal_info{};
-
-                ssize_t bytes_read =
-                    read(signal_fd_, &signal_info, sizeof(signal_info));
-
-                if (bytes_read == static_cast<ssize_t>(sizeof(signal_info)))
+                signalfd_siginfo info{};
+                if (read(signal_fd_, &info, sizeof(info)) != sizeof(info)) continue;
+                Logger::instance().info("Shutdown signal received: " + std::to_string(info.ssi_signo));
+                stopping_ = true;
+                stop_deadline_ = Clock::now() + std::chrono::seconds(5);
+                epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, server_fd_, nullptr);
+                for (auto it = clients_.begin(); it != clients_.end();)
                 {
-                    Logger::instance().info(
-                        "Shutdown signal received: " +
-                        std::to_string(signal_info.ssi_signo));
-
-                    return;
+                    const auto key = it->first;
+                    bool idle = !it->second.busy && it->second.interest == Next::Read;
+                    ++it;
+                    if (idle) close_client(key);
                 }
-
-                if (bytes_read == -1 &&
-                    (errno == EAGAIN || errno == EINTR))
-                {
-                    continue;
-                }
-
-                Logger::instance().error("Failed to read shutdown signal");
-                return;
+                continue;
             }
-
-            if (ready_fd == server_fd_)
-            {
-                int client_fd = accept(server_fd_, nullptr, nullptr);
-
-                if (client_fd == -1)
-                {
-                    std::cerr << "Failed to accept client\n";
-                    continue;
-                }
-
-                epoll_event client_event{};
-
-                client_event.events = EPOLLIN;
-                client_event.data.fd = client_fd;
-
-                if (epoll_ctl(epoll_fd_,
-                              EPOLL_CTL_ADD,
-                              client_fd,
-                              &client_event) == -1)
-                {
-                    std::cerr << "Failed to add client socket to epoll\n";
-                    close(client_fd);
-                    continue;
-                }
-
-                mark_client_idle(client_fd);
-
-                Logger::instance().info(
-                    "Client connected and added to epoll, fd = " +
-                    std::to_string(client_fd));
-            }
+            if (id == 2) { drain_completions(); continue; }
+            auto it = clients_.find(id);
+            if (it == clients_.end() || it->second.busy) continue;
+            if (flags & (EPOLLERR | EPOLLHUP)) { close_client(id); continue; }
+            touch(id);
+            auto action = it->second.interest;
+            if (config_.actor_model == 1) dispatch(id, action);
             else
             {
-                remove_client_from_idle(ready_fd);
-
-                if (epoll_ctl(epoll_fd_,
-                              EPOLL_CTL_DEL,
-                              ready_fd,
-                              nullptr) == -1)
-                {
-                    std::cerr << "Failed to remove client socket from epoll\n";
-                    close(ready_fd);
-                    continue;
-                }
-
-                thread_pool_.enqueue([this, ready_fd]
-                                     {
-                    HttpConnection connection(ready_fd);
-
-                    bool keep_alive = connection.handle();
-
-                    if(!keep_alive){
-                        close(ready_fd);
-                        return;
-                    }
-
-                    mark_client_idle(ready_fd);
-
-                    epoll_event client_event{};
-                    client_event.events = EPOLLIN;
-                    client_event.data.fd = ready_fd;
-
-                    if(epoll_ctl(epoll_fd_,
-                                 EPOLL_CTL_ADD,
-                                 ready_fd,
-                                 &client_event) == -1)
-                    {
-                        std::cerr << "Failed to add keep_alive connection back to epoll\n";
-                        remove_client_from_idle(ready_fd);
-                        close(ready_fd);
-                    } });
+                // 模拟 Proactor：主线程收发，工作线程解析、查库、准备响应。
+                auto result = action == Next::Write ? it->second.http->write_ready() :
+                    it->second.http->read_ready(config_.trigger_mode % 2);
+                apply_result(id, result);
             }
         }
-
-        close_idle_connections();
+        expire_clients();
     }
+    thread_pool_.shutdown();
+    drain_completions();
+    clients_.clear();
+    timers_.clear();
+    Logger::instance().info("Server stopped; workers joined and connections released");
 }

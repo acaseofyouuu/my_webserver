@@ -69,3 +69,7 @@ Testing/
 
 # Local WebServer executable
 /server
+/server-sanitize
+/logs/
+/test_pressure/webbench-1.5/webbench
+/tests/__pycache__/

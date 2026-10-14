@@ -1,0 +1,20 @@
+This learning project refers to qinguoyi/TinyWebServer:
+https://github.com/qinguoyi/TinyWebServer
+
+The user's existing C++17 implementation is retained and extended; the server
+source is not a verbatim copy of the upstream server. The project LICENSE
+continues to apply to this implementation.
+
+root/xxx.jpg and root/xxx.mp4 are unmodified example assets copied from the
+user's local TinyWebServer-master/root distribution for the same demo purpose.
+No independent authorship of these assets is claimed. Upstream distribution
+and attribution should accompany any reuse of the examples.
+
+test_pressure/webbench-1.5 is a separate tool by Radim Kolar, 1997-2004,
+licensed under GPL version 2, not the server's Apache-2.0 license.
+Its socket.c includes public-domain code from the Virginia Tech Computing Center.
+The original source headers, debian/copyright and COPYING are retained.
+Local modifications (2026-10-14): removed the unused rpc/types.h include to build
+on current Ubuntu; initialized the signal mask; corrected the parent exit code
+to report success/failure instead of the final child's request count. A missing
+child result is counted as a failure. The request-generation loop is retained.

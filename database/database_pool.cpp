@@ -44,6 +44,10 @@ bool DatabasePool::initialize(const std::string &host,
         mysql_options(connection,
                       MYSQL_SET_CHARSET_NAME,
                       "utf8mb4");
+        unsigned int timeout = 5;
+        mysql_options(connection, MYSQL_OPT_CONNECT_TIMEOUT, &timeout);
+        mysql_options(connection, MYSQL_OPT_READ_TIMEOUT, &timeout);
+        mysql_options(connection, MYSQL_OPT_WRITE_TIMEOUT, &timeout);
 
         if (mysql_real_connect(connection,
                                host.c_str(),

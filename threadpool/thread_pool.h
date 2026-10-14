@@ -14,7 +14,7 @@ public:
     explicit ThreadPool(std::size_t thread_count);
     ~ThreadPool();
 
-    void enqueue(std::function<void()> task);
+    bool enqueue(std::function<void()> task);
 
     void shutdown();
 
