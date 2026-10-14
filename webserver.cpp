@@ -206,8 +206,6 @@ void WebServer::run()
 
     while (true)
     {
-        std::cout << "Waiting for events..." << std::endl;
-
         int event_count =
             epoll_wait(epoll_fd_, events, max_events, 1000);
 
