@@ -8,16 +8,17 @@
   <body>
     <h1>注册账号</h1>
 
-    <form action="/register" method="post">
+    <form action="/3CGISQL.cgi" method="post">
       <label for="username">用户名</label>
-      <input id="username" name="username" type="text" maxlength="50" required />
+      <input id="username" name="user" type="text" maxlength="50" required />
 
       <label for="password">密码</label>
-      <input id="password" name="password" type="password" required />
+      <input id="password" name="password" type="password" minlength="8" maxlength="128" required />
 
       <button type="submit">注册</button>
     </form>
 
+    <p><a href="/log.html">已有账号？去登录</a></p>
     <a href="/">返回首页</a>
   </body>
 </html>

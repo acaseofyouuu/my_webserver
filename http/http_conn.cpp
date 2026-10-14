@@ -560,6 +560,21 @@ bool HttpConnection::handle()
         }
     }
 
+    // 原版的表单地址复用已有账号逻辑，不另建一套账号或会话。
+    const bool original_account_action =
+        request_path == "/2" || request_path == "/2CGISQL.cgi" ||
+        request_path == "/3" || request_path == "/3CGISQL.cgi";
+    const bool page_navigation = request_path == "/0" || request_path == "/1";
+
+    if (request_path == "/2" || request_path == "/2CGISQL.cgi")
+    {
+        request_path = "/login";
+    }
+    else if (request_path == "/3" || request_path == "/3CGISQL.cgi")
+    {
+        request_path = "/register";
+    }
+
     bool account_action =
         request_path == "/register" ||
         request_path == "/login";
@@ -576,19 +591,20 @@ bool HttpConnection::handle()
     {
         auto content_type = headers.find("content-type");
         std::unordered_map<std::string, std::string> fields;
+        const std::string username_field = original_account_action ? "user" : "username";
 
         if (content_type == headers.end() ||
             content_type->second != "application/x-www-form-urlencoded" ||
             !parse_form_fields(request_body, fields) ||
             fields.size() != 2 ||
-            fields.find("username") == fields.end() ||
+            fields.find(username_field) == fields.end() ||
             fields.find("password") == fields.end())
         {
             malformed_request = true;
         }
         else
         {
-            username = fields["username"];
+            username = fields[username_field];
             password = fields["password"];
 
             if (username.empty() ||
@@ -608,11 +624,12 @@ bool HttpConnection::handle()
     bool method_not_allowed =
         !malformed_request &&
         ((post_action && method != "POST") ||
-         (!post_action && method != "GET"));
+         (page_navigation && method != "GET" && method != "POST") ||
+         (!post_action && !page_navigation && method != "GET"));
 
     if (!malformed_request && request_path == "/")
     {
-        request_path = "/index.html";
+        request_path = "/judge.html";
     }
 
     bool invalid_path =
@@ -656,6 +673,11 @@ bool HttpConnection::handle()
         file_path = "root/404.html";
         status_line = "HTTP/1.1 404 Not Found\r\n";
     }
+    else if (page_navigation)
+    {
+        file_path = request_path == "/0" ? "root/register.html" : "root/log.html";
+        status_line = "HTTP/1.1 200 OK\r\n";
+    }
     else if (request_path == "/logout")
     {
         SessionManager::instance().remove(current_session_id);
@@ -687,7 +709,8 @@ bool HttpConnection::handle()
 
         if (result == AccountRepository::RegisterResult::Created)
         {
-            file_path = "root/register_success.html";
+            // 原版注册成功后显示登录表单；旧 /register 接口保留已有成功页。
+            file_path = original_account_action ? "root/log.html" : "root/register_success.html";
             status_line = "HTTP/1.1 201 Created\r\n";
         }
         else if (result ==
@@ -719,7 +742,7 @@ bool HttpConnection::handle()
                     std::to_string(SessionManager::lifetime_seconds) +
                     "\r\n";
 
-                file_path = "root/login_success.html";
+                file_path = original_account_action ? "root/welcome.html" : "root/login_success.html";
                 status_line = "HTTP/1.1 200 OK\r\n";
             }
             else
@@ -739,6 +762,12 @@ bool HttpConnection::handle()
             file_path = "root/500.html";
             status_line = "HTTP/1.1 500 Internal Server Error\r\n";
         }
+    }
+    else if (request_path == "/logError.html" || request_path == "/registerError.html")
+    {
+        file_path = request_path == "/logError.html" ?
+            "root/login_failed.html" : "root/register_exists.html";
+        status_line = "HTTP/1.1 200 OK\r\n";
     }
     else
     {
@@ -784,6 +813,10 @@ bool HttpConnection::handle()
         if (post_action)
         {
             response += "Allow: POST\r\n";
+        }
+        else if (page_navigation)
+        {
+            response += "Allow: GET, POST\r\n";
         }
         else
         {

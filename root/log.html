@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/style.css" />
+    <title>登录</title>
+  </head>
+  <body>
+    <h1>登录</h1>
+    <form action="/2CGISQL.cgi" method="post">
+      <label for="user">用户名</label>
+      <input id="user" name="user" type="text" maxlength="50" required />
+      <label for="password">密码</label>
+      <input id="password" name="password" type="password" maxlength="128" required />
+      <button type="submit">登录</button>
+    </form>
+    <p><a href="/register.html">没有账号？去注册</a></p>
+    <p><a href="/">返回首页</a></p>
+  </body>
+</html>
